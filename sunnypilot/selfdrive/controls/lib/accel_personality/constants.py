@@ -15,20 +15,20 @@ SPORT = AccelerationPersonality.sport
 PERSONALITY_MIN = min(AccelerationPersonality.schema.enumerants.values())
 PERSONALITY_MAX = max(AccelerationPersonality.schema.enumerants.values())
 
-# Accel ceiling. NORMAL is stock so a disabled controller (forced to NORMAL) is stock.
-# This is the POSITIVE-accel upper clip + its upward slew rate. It is the launch/cruise-accel side and
-# is independent of braking (which is the lower clip + the convex/SMOOTH_DECEL shaper) -- tuning it does
-# NOT change the gentle-brake goals. ECO launch (v=0) matches stock + stock rise rate so take-off from
-# a stop is prompt (no honking); only the 25/40 m/s cruise points stay gentle.
+# Accel ceiling + its upward slew rate (the POSITIVE-accel / launch + cruise-accel side; independent of
+# braking, so tuning here does NOT touch the gentle-brake goals). off==stock is enforced in accel_controller
+# (get_max_accel/get_rise_rate fall back to STOCK_* when disabled), so the NORMAL profile is free to differ
+# from stock -- all three tiers are now distinct. Start-from-stop is FAST: launch peak (v=0) is firm and the
+# rise rate (how fast the ceiling opens) is well above stock 0.05 in every tier, stepped ECO < NORMAL < SPORT.
 A_CRUISE_MAX_BP = [0., 14., 25., 40.]
 STOCK_A_CRUISE_MAX_V = [1.6, 0.7, 0.2, 0.08]
 STOCK_RISE_RATE = 0.05
 A_CRUISE_MAX_V = {
-  ECO:    [1.60, 0.60, 0.13, 0.05],   # stock launch (v=0), gentle cruise (25/40)
-  NORMAL: STOCK_A_CRUISE_MAX_V,
-  SPORT:  [1.90, 1.30, 0.60, 0.25],
+  ECO:    [1.70, 0.75, 0.25, 0.10],   # prompt launch, efficient cruise
+  NORMAL: [2.10, 1.10, 0.50, 0.18],   # quick launch, balanced cruise
+  SPORT:  [2.60, 1.55, 0.85, 0.35],   # fast launch, strong cruise
 }
-RISE_RATE = {ECO: 0.05, NORMAL: STOCK_RISE_RATE, SPORT: 0.06}   # ECO rise = stock so launch ramps promptly
+RISE_RATE = {ECO: 0.10, NORMAL: 0.15, SPORT: 0.22}   # ceiling open-rate: all >> stock 0.05 for fast take-off
 
 # Early soft braking: predicted brake need (m/s^2) -> early decel target (m/s^2). Front-loads a gentle
 # decel as soon as the 3s plan lookahead predicts a brake, so decel is spread out instead of arriving as
@@ -44,7 +44,7 @@ SMOOTH_DECEL_V = {
 }
 BRAKE_DEEPENING_JERK = {ECO: 0.5, NORMAL: 0.8, SPORT: 1.0}
 BRAKE_RELEASE_JERK = 2.0
-ACCEL_RISE_JERK = {ECO: 0.7, NORMAL: 1.2, SPORT: 1.6}
+ACCEL_RISE_JERK = {ECO: 1.0, NORMAL: 1.5, SPORT: 2.2}   # accel-onset jerk: higher = snappier take-off, stepped per tier
 
 SMOOTH_DECEL_LOOKAHEAD_T = 3.0
 MIN_SMOOTH_BRAKE_NEED = 0.2

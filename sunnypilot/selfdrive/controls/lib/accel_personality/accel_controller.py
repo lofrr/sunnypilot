@@ -16,6 +16,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   NORMAL, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, A_CRUISE_MAX_V, RISE_RATE, SMOOTH_DECEL_BP, \
+  STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, \
   SMOOTH_DECEL_V, BRAKE_DEEPENING_JERK, BRAKE_RELEASE_JERK, ACCEL_RISE_JERK, SMOOTH_DECEL_LOOKAHEAD_T, \
   MIN_SMOOTH_BRAKE_NEED, HARD_BRAKE_TARGET_ACCEL, HARD_BRAKE_NEED, STOP_IMMINENT_VEGO, STOP_IMMINENT_LOOKAHEAD_T, \
   ONSET_JERK0, ONSET_JERK_GAIN, ONSET_GAP_SOFT, ONSET_GAP_GAIN, ONSET_JERK_MAX, ONSET_HANDBACK_JERK, \
@@ -59,10 +60,13 @@ class AccelController:
     self._frame += 1
 
   def get_max_accel(self, v_ego: float) -> float:
-    return float(np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_V[self._personality]))
+    # Disabled -> stock ceiling (off == stock, independent of the NORMAL profile so NORMAL is free to differ).
+    table = A_CRUISE_MAX_V[self._personality] if self._enabled else STOCK_A_CRUISE_MAX_V
+    return float(np.interp(v_ego, A_CRUISE_MAX_BP, table))
 
   def get_rise_rate(self) -> float:
-    return RISE_RATE[self._personality]
+    # Disabled -> stock rise rate (off == stock, independent of the NORMAL profile).
+    return RISE_RATE[self._personality] if self._enabled else STOCK_RISE_RATE
 
   def get_decel_target(self, brake_need: float) -> float:
     return float(np.interp(max(0.0, float(brake_need)), SMOOTH_DECEL_BP, SMOOTH_DECEL_V[self._personality]))

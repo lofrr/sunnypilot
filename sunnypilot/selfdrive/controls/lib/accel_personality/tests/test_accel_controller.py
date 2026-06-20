@@ -77,21 +77,21 @@ def test_disabled_passes_brake_through():
     assert out == pytest.approx(raw, abs=_EPS)
 
 
-def test_normal_matches_stock():
+def test_normal_is_distinct_from_stock():
+  # off==stock is enforced via the disabled path (see test_disabled_forces_normal_and_stock_ceiling), NOT by
+  # NORMAL==stock. So the enabled NORMAL tier is free to differ from stock -- and now does.
   ctrl = make_controller(personality=NORMAL)
-  for v in (0.0, 5.0, 10.0, 25.0, 40.0):
-    assert ctrl.get_max_accel(v) == pytest.approx(np.interp(v, A_CRUISE_MAX_BP, STOCK_A_CRUISE_MAX_V))
-  assert ctrl.get_rise_rate() == STOCK_RISE_RATE
+  assert ctrl.get_max_accel(0.0) != pytest.approx(np.interp(0.0, A_CRUISE_MAX_BP, STOCK_A_CRUISE_MAX_V))
+  assert ctrl.get_rise_rate() != STOCK_RISE_RATE
 
 
-def test_ceiling_ordering_eco_le_normal_lt_sport():
-  # ECO launch (v=0) intentionally matches stock for prompt take-off; ECO is strictly gentler only at
-  # cruise speeds. So ECO <= NORMAL everywhere, strictly below at cruise; SPORT strictly above NORMAL.
+def test_ceiling_ordering_eco_lt_normal_lt_sport():
+  # All three tiers are distinct: ECO < NORMAL < SPORT at every speed (launch and cruise). Each launches
+  # promptly (peak + rise rate above stock), stepped by tier.
   eco, normal, sport = (make_controller(personality=p) for p in (ECO, NORMAL, SPORT))
-  for v in (0.0, 10.0, 25.0, 40.0):
-    assert eco.get_max_accel(v) <= normal.get_max_accel(v) < sport.get_max_accel(v)
-  for v in (14.0, 25.0, 40.0):
-    assert eco.get_max_accel(v) < normal.get_max_accel(v)
+  for v in (0.0, 14.0, 25.0, 40.0):
+    assert eco.get_max_accel(v) < normal.get_max_accel(v) < sport.get_max_accel(v)
+  assert eco.get_rise_rate() < normal.get_rise_rate() < sport.get_rise_rate()
 
 
 def test_rise_rate_ordering():
