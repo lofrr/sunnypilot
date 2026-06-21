@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from openpilot.sunnypilot.selfdrive.controls.lib.radar_distance.radar_distance import \
-  RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, STOP_MARGIN, STOP_MARGIN_V
+  RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, LOW_SPEED_PASSTHROUGH_V
 
 COMFORT_BRAKE = 2.5
 
@@ -38,7 +38,7 @@ def obstacle(ld):
 
 def ctrl(enabled=True):
   c = RadarDistanceController(CP=SimpleNamespace(), params=FakeParams({'RadarDistance': enabled}))
-  c._v_ego = STOP_MARGIN_V[1] + 10.0  # default to a no-margin (cruise) speed so hold-logic tests are isolated
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 10.0  # default above the gate so hold-logic tests exercise the flicker-hold
   return c
 
 
@@ -85,21 +85,26 @@ def test_low_speed_override_lead_arms_hold():
   assert held.status is True                         # armed off the prob=0 lead, holds through dropout
 
 
-def test_stop_margin_pulls_lead_in_near_stop():
-  # at standstill the reported lead is pulled in by STOP_MARGIN so the MPC keeps extra real gap (roomier stop)
+def test_low_speed_returns_raw_object():
+  # Stop/creep regime: ENABLED returns the EXACT raw radarstate object (byte-identical to OFF), so the
+  # lead the MPC sees -- and thus the stop distance -- is stock. This is the core stop-neutrality guarantee.
   c = ctrl()
-  c._v_ego = STOP_MARGIN_V[0]            # full-margin regime
-  out = c.smooth_radarstate(rs(lead(status=True, dRel=6.0, vRel=0.0, vLead=0.0)))
-  assert out.leadOne.dRel == pytest.approx(6.0 - STOP_MARGIN, abs=1e-6)
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V - 0.1
+  r = rs(lead(status=True, dRel=6.0, vRel=0.0, vLead=0.0))
+  assert c.smooth_radarstate(r) is r                 # object identity == stock
 
 
-def test_stop_margin_off_at_speed():
-  # no margin at cruise speed -> untouched passthrough (full-fidelity real lead to the MPC)
+def test_low_speed_passthrough_but_hold_warmed_for_highway():
+  # At low speed the raw radarstate is returned, but the hold is still stepped (state kept warm) so the
+  # flicker-hold engages the moment speed rises above the gate.
   c = ctrl()
-  c._v_ego = STOP_MARGIN_V[1] + 5.0
-  one = lead(status=True, dRel=40.0)
-  out = c.smooth_radarstate(rs(one))
-  assert out.leadOne is one
+  for _ in range(3):                                 # sustain a real lead while in the low-speed regime
+    c._v_ego = LOW_SPEED_PASSTHROUGH_V - 0.1
+    r = rs(lead(dRel=30.0, vRel=-4.0, vLead=16.0))
+    assert c.smooth_radarstate(r) is r               # returned object stays raw at low speed
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 10.0          # rise above the gate -> dropout now held (proxy, not raw)
+  out = c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0)))
+  assert out.leadOne.status is True
 
 
 def test_obstacle_monotone_during_hold():

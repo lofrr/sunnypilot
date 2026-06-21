@@ -48,6 +48,13 @@ ACCEL_RISE_JERK = {ECO: 1.0, NORMAL: 1.5, SPORT: 2.2}   # accel-onset jerk: high
 
 SMOOTH_DECEL_LOOKAHEAD_T = 3.0
 MIN_SMOOTH_BRAKE_NEED = 0.2
+
+# Front-load over-bite cap. The SMOOTH_DECEL front-load is allowed to brake at most this much DEEPER than
+# the live raw plan. On a cut-in/merge the 3s brake_need spikes and the table would front-load a firm brake
+# while the plan still wants throttle/coast -> an abrupt early bite (the "worse on merge" feel; routes
+# 45e/460). This binds only in that contradictory case; once the plan itself brakes, raw-OVERBITE_CAP sits
+# below the table value so the table wins and the anticipatory early brake (route 456 fix) is preserved.
+OVERBITE_CAP = 0.30   # m/s^2 max front-load depth below the live plan
 HARD_BRAKE_TARGET_ACCEL = -1.5
 HARD_BRAKE_NEED = 2.6
 
@@ -68,6 +75,12 @@ HARD_BRAKE_ONSET_JERK = 2.0   # m/s^3, deepening-only onset rate cap on firm (no
 # -- so non-stop low-speed braking (slowing to a moving follow) keeps the gentle onset at every speed.
 STOP_IMMINENT_VEGO = 1.0          # m/s  plan-predicted speed below this within the lookahead == stop coming
 STOP_IMMINENT_LOOKAHEAD_T = 3.0   # s
+
+# Stop/creep stop-neutrality. Below this ego speed, the brake side hands the plan straight through (stock),
+# so the controller cannot soften the final crawl and let the car coast in closer than stock. Matches the
+# radar_distance low-speed stop-neutrality so ON == OFF near stops. Positive-accel (launch) shaping is
+# unaffected (the launch profiles still apply via the accel ceiling).
+STOP_PASSTHROUGH_V = 5.0          # m/s ego speed below which braking is stock passthrough
 
 # --- Convex brake-onset shaper (param-gated; ECO/SPORT only, NORMAL = stock passthrough) ---
 # The grabby bite is the raw MPC plan: stock deepening uses a CONSTANT jerk (integrates to a LINEAR

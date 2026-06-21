@@ -15,7 +15,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.accel_controller import AccelController as _AC  # noqa: F401
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   ECO, NORMAL, SPORT, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, RISE_RATE, \
-  STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, HARD_BRAKE_TARGET_ACCEL, HARD_BRAKE_ONSET_JERK, AccelerationPersonality, \
+  STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, HARD_BRAKE_TARGET_ACCEL, HARD_BRAKE_ONSET_JERK, OVERBITE_CAP, \
+  STOP_PASSTHROUGH_V, AccelerationPersonality, \
   BRAKE_DEEPENING_JERK, ONSET_JERK0, ONSET_GAP_SOFT, ONSET_HANDBACK_JERK
 
 # The convex onset brakes shallower than the plan during the bite, but the instantaneous-gap catch-up
@@ -105,6 +106,48 @@ def test_early_soft_braking_brakes_before_plan():
   assert out < 0.0
   assert ctrl.smooth_active()
   assert ctrl.brake_need() == pytest.approx(1.0)
+
+
+def test_low_speed_brake_is_stock_passthrough():
+  # Stop/creep regime (vEgo < STOP_PASSTHROUGH_V): braking is handed through unshaped (stock) so the
+  # controller cannot soften the crawl and let the car coast in closer than stock.
+  ctrl = make_controller(personality=ECO)
+  ctrl.update(make_sm(v_ego=STOP_PASSTHROUGH_V - 0.1))
+  for raw in (-0.3, -1.0):                                   # a braking plan that would normally front-load
+    out = ctrl.smooth_target_accel(raw, flat_traj(-1.5), T_IDXS, should_stop=False)
+    assert out == pytest.approx(raw, abs=_EPS)              # exact stock passthrough, no front-load
+    assert not ctrl.smooth_active()
+
+
+def test_low_speed_launch_still_shapes():
+  # The low-speed brake passthrough must NOT neutralize positive-accel (launch) shaping.
+  ctrl = make_controller(personality=ECO)
+  ctrl.update(make_sm(v_ego=STOP_PASSTHROUGH_V - 0.1))
+  ctrl.smooth_target_accel(0.0, flat_traj(0.0), T_IDXS, should_stop=False)   # seed
+  out = ctrl.smooth_target_accel(1.5, flat_traj(1.5), T_IDXS, should_stop=False)
+  assert out < 1.5                                           # rise-rate limited (shaped), not raw passthrough
+
+
+def test_overbite_cap_limits_frontload_vs_live_plan():
+  # Cut-in/merge: raw plan still wants throttle (+0.5) while a deep brake is predicted ahead (brake_need
+  # high). The front-load must not settle more than OVERBITE_CAP below the LIVE plan -> no abrupt early grab.
+  ctrl = make_controller(personality=ECO)
+  traj = [0.5, 0.3, 0.0, -0.5, -1.5, -2.0] + [-2.0] * (len(T_IDXS) - 6)   # throttle now, hard brake later
+  out = 0.0
+  for _ in range(8):                                       # let the accel rise-rate slew settle
+    out = ctrl.smooth_target_accel(0.5, traj, T_IDXS, should_stop=False)
+  assert ctrl.smooth_active()
+  assert out == pytest.approx(0.5 - OVERBITE_CAP, abs=1e-3)  # front-load clamped to exactly cap below plan
+
+
+def test_overbite_cap_preserves_anticipation_when_plan_braking():
+  # Once the live plan is itself braking, raw-OVERBITE_CAP sits below the table, so the cap does NOT bind
+  # and the anticipatory front-load (route 456 fix) is preserved (output deeper than the shallow raw).
+  ctrl = make_controller(personality=ECO)
+  out = 0.0
+  for _ in range(4):
+    out = ctrl.smooth_target_accel(-0.2, flat_traj(-1.5), T_IDXS, should_stop=False)
+  assert out < -0.2 - _EPS                                 # still front-loads below the live -0.2 plan
 
 
 def test_stop_imminent_stands_down_but_moving_follow_shapes():
@@ -273,11 +316,14 @@ def test_fcw_crash_cnt_bypass():
   assert ctrl.bypassed()
 
 
-def test_e2e_brake_passthrough():
+def test_blended_never_softens_brake():
+  # Blended/e2e (stock_brake): the brake is NEVER softened -> output is never weaker than the plan and
+  # the convex soft-onset never engages. (It may still anticipate via the never-weaker front-load.)
   ctrl = make_controller(personality=ECO)
-  out = ctrl.smooth_target_accel(-1.0, flat_traj(-1.0), T_IDXS, should_stop=False, stock_brake=True)
-  assert out == pytest.approx(-1.0, abs=_EPS)
-  assert not ctrl.smooth_active()
+  for raw in [0.0, -0.3, -0.6, -0.9, -1.0, -1.0, -1.0]:
+    out = ctrl.smooth_target_accel(raw, flat_traj(raw), T_IDXS, should_stop=False, stock_brake=True)
+    assert out <= raw + _EPS                 # never weaker than the plan (no softening)
+    assert not ctrl._soft_active             # convex soft-onset disabled in blended
 
 
 def test_out_of_range_personality_clamps():
