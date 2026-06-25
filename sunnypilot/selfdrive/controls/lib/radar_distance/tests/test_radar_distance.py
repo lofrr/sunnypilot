@@ -107,23 +107,13 @@ def test_low_speed_passthrough_but_hold_warmed_for_highway():
   assert out.leadOne.status is True
 
 
-def test_vlead_filter_lags_rise_instant_fall_never_weaker():
-  # Above the stop gate: a lead speeding up is lagged (reported vLead < real -> damps the catch-up surge),
-  # a lead slowing is instant (reported == real -> brake now). Reported vLead is ALWAYS <= real (never weaker).
+def test_vlead_passed_through_unchanged():
+  # The lead's real speed is reported as-is above the gate (no rise-lag) -- a lead pulling away is NOT
+  # reported as still-slow, so no phantom-slow-lead braking / stop-and-go rubber-band.
   c = ctrl()                                           # default _v_ego above the gate
-  c.smooth_radarstate(rs(lead(dRel=30.0, vLead=15.0))) # seed the filter at 15
+  c.smooth_radarstate(rs(lead(dRel=30.0, vLead=15.0)))
   rising = c.smooth_radarstate(rs(lead(dRel=30.0, vLead=25.0))).leadOne
-  assert 15.0 <= rising.vLead < 25.0                   # lagged below the real rise
-  falling = c.smooth_radarstate(rs(lead(dRel=30.0, vLead=10.0))).leadOne
-  assert falling.vLead == pytest.approx(10.0, abs=1e-6)  # instant on slow-down
-
-
-def test_vlead_filter_off_below_gate():
-  # Stop/creep regime: raw passthrough, filter does not act (stop distance stays byte-stock).
-  c = ctrl()
-  c._v_ego = LOW_SPEED_PASSTHROUGH_V - 0.1
-  one = lead(dRel=6.0, vLead=2.0)
-  assert c.smooth_radarstate(rs(one)).leadOne is one
+  assert rising.vLead == pytest.approx(25.0, abs=1e-6)   # real speed, not lagged below it
 
 
 def test_obstacle_monotone_during_hold():
