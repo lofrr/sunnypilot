@@ -36,9 +36,10 @@ def obstacle(ld):
   return ld.dRel + ld.vLead ** 2 / (2 * COMFORT_BRAKE)
 
 
-def ctrl(enabled=True):
+def ctrl(enabled=True, vlead_damp=False):
   c = RadarDistanceController(CP=SimpleNamespace(), params=FakeParams({'RadarDistance': enabled}))
   c._v_ego = LOW_SPEED_PASSTHROUGH_V + 10.0  # default above the gate so hold-logic tests exercise the flicker-hold
+  c._vlead_damp_enabled = vlead_damp         # speed-damp (B) is gated off in production; opt in per-test
   return c
 
 
@@ -108,7 +109,7 @@ def test_low_speed_passthrough_but_hold_warmed_for_highway():
 
 
 def test_vlead_lags_rise_instant_fall():
-  c = ctrl()
+  c = ctrl(vlead_damp=True)                                     # speed-damp (B) under test; gated off in production
   c.smooth_radarstate(rs(lead(dRel=30.0, vLead=15.0)))           # seed at 15
   rising = c.smooth_radarstate(rs(lead(dRel=30.0, vLead=25.0))).leadOne
   assert 15.0 <= rising.vLead < 25.0                            # rise lagged (<= real -> never faster than real)
@@ -119,11 +120,20 @@ def test_vlead_lags_rise_instant_fall():
 def test_vlead_resets_on_track_switch_no_phantom_slow():
   # the old bug: a slow lead's filtered speed carried across a switch to a fast farther track, reporting it
   # near-stopped. A dRel jump (track switch) now resets the filter -> the new track's real speed is reported.
-  c = ctrl()
+  c = ctrl(vlead_damp=True)                                     # speed-damp (B) under test; gated off in production
   for _ in range(3):
     c.smooth_radarstate(rs(lead(dRel=12.0, vLead=0.5)))         # slow close lead
   switched = c.smooth_radarstate(rs(lead(dRel=80.0, vLead=18.0))).leadOne  # different, far, fast track
   assert switched.vLead == pytest.approx(18.0, abs=1e-6)        # real speed, not the stale ~0.5
+
+
+def test_vlead_damp_gated_off_reports_real_speed():
+  # Production default (VLEAD_DAMP_ENABLED off): a speeding-up lead is NOT lagged -> real vLead passes through
+  # (flicker-hold A only). This is the on-by-default behavior; B is opt-in pending on-road proof.
+  c = ctrl()                                                    # vlead_damp defaults off (production)
+  c.smooth_radarstate(rs(lead(dRel=30.0, vLead=15.0)))
+  rising = c.smooth_radarstate(rs(lead(dRel=30.0, vLead=25.0))).leadOne
+  assert rising.vLead == pytest.approx(25.0, abs=1e-6)          # no damp -> real speed
 
 
 def test_obstacle_monotone_during_hold():

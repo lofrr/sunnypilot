@@ -5,7 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 Acceleration personality: per-profile launch/cruise accel ceiling (ECO/NORMAL/SPORT), an anticipatory
-brake front-load, and a low-speed comfort stop. SAFETY: a firm/closing brake -- emergency (raw <=
+brake front-load, and a low-speed comfort stop (gated OFF by default via COMFORT_STOP_ENABLED -- stops pass
+through stock). SAFETY: a firm/closing brake -- emergency (raw <=
 HARD_BRAKE_TARGET_ACCEL or brake_need >= HARD_BRAKE_NEED), FCW/crash, should_stop, or blended/e2e -- passes
 the plan straight through at full strength and rate, never softened/delayed/rate-limited. Only on the
 NON-emergency comfort path may the onset arrive spread by at most ONSET_SPREAD_MAX (a tightly bounded,
@@ -28,7 +29,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants imp
   BRAKE_RELEASE_JERK, ACCEL_RISE_JERK, SMOOTH_DECEL_LOOKAHEAD_T, MIN_SMOOTH_BRAKE_NEED, \
   HARD_BRAKE_TARGET_ACCEL, HARD_BRAKE_NEED, OVERBITE_CAP, STOP_PASSTHROUGH_V, \
   STOP_IMMINENT_VEGO, STOP_IMMINENT_LOOKAHEAD_T, ONSET_SPREAD_MAX, ONSET_SPREAD_JERK, \
-  COMFORT_STOP_V, COMFORT_STOP_LEAD_V, COMFORT_STOP_GAP, \
+  COMFORT_STOP_ENABLED, COMFORT_STOP_V, COMFORT_STOP_LEAD_V, COMFORT_STOP_GAP, \
   COMFORT_STOP_MAX_DECEL, COMFORT_STOP_RELEASE_V, COMFORT_STOP_HOLD_GAP
 
 _ZERO_ACCEL_EPS = 1e-6
@@ -52,6 +53,7 @@ class AccelController:
     self._lead_d = 0.0
     self._lead_vlead = 0.0
     self._stop_floor = 0.0       # comfort-stop floor latch (monotone within a stop episode, eased on release)
+    self._comfort_stop_enabled = COMFORT_STOP_ENABLED   # gated OFF: stops pass through stock (goal 6 stock-met)
     self._read_params()
 
   def _read_params(self) -> None:
@@ -140,8 +142,8 @@ class AccelController:
     # enforcer demanded a firm ~-1.6 grab; this does not). Outside the window (gap opening as a creeping lead
     # pulls away / lead moving / launch / standstill) the floor eases out at the release rate. min(out, floor)
     # keeps it never weaker than the plan. Off => no-op (off==stock).
-    if reset or not self._enabled:
-      self._stop_floor = 0.0                                   # disengaged/disabled: drop the latch, pure passthrough
+    if reset or not self._enabled or not self._comfort_stop_enabled:
+      self._stop_floor = 0.0                                   # disabled/gated/reset: drop the latch, pure passthrough
       return out
     final_approach = (self._lead_status and self._lead_vlead < COMFORT_STOP_LEAD_V and self._lead_d > 0.1
                       and COMFORT_STOP_RELEASE_V <= self._v_ego < COMFORT_STOP_V

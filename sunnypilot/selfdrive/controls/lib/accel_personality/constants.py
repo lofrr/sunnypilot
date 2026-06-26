@@ -79,6 +79,11 @@ ONSET_SPREAD_JERK = 2.5           # m/s^3: rate the spread output deepens back t
 # (cruising / gap opening as a creeping lead pulls away / lead moving / launch) the floor eases out at the
 # release rate. min(plan, floor) keeps it never weaker than the plan. Replaces the old kinematic v^2/(2*gap)
 # enforcer, which engaged late and demanded a firm ~-1.6 grab to hit a fixed gap. Off => no-op.
+# Gated OFF by default and independently of AccelPersonalityEnabled: the final approach passes through stock,
+# because goal 6 (smooth coming to stop) is already met by the stock/Toyota tune (parks ~4.2m smoothly) and the
+# old stops-too-close complaint traced to the radar_distance modelProb gate, since fixed at source. Re-enable
+# (flip True) only if an on-road roll-in / creep is observed, ideally with a gentler COMFORT_STOP_MAX_DECEL (~-1.2).
+COMFORT_STOP_ENABLED = False
 COMFORT_STOP_V = 4.0              # m/s: only engage at/below this ego speed
 COMFORT_STOP_LEAD_V = 1.0         # m/s: only behind a (near-)stopped lead
 COMFORT_STOP_GAP = 5.0            # m: reference standstill gap (radar dRel) for the final-approach window

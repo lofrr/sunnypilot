@@ -25,6 +25,11 @@ MIN_HELD_DREL = 0.5
 
 LOW_SPEED_PASSTHROUGH_V = 5.0   # m/s
 
+# Speed-damp (B) is gated OFF: it lags a speeding-up lead (input-side) and a prior version caused phantom
+# braking + a launch rubber-band (lead measured up to ~11 m/s slower than real). Flicker-hold (A) runs alone.
+# Flip True only behind an on-road check of a lead accelerating away above LOW_SPEED_PASSTHROUGH_V; if a
+# failure-to-release appears, prefer an output-side accel slew over re-enabling this input-side lag.
+VLEAD_DAMP_ENABLED = False
 VLEAD_TAU = 0.4                 # s, lag on a speeding-up lead
 _VLEAD_ALPHA = DT_MDL / VLEAD_TAU
 SWITCH_DREL = 8.0              # m, dRel jump that means the radar switched to a different track -> reset the filter
@@ -125,6 +130,7 @@ class RadarDistanceController:
     self._frame = 0
     self._v_ego = 0.0
     self._enabled = self._params.get_bool("RadarDistance")
+    self._vlead_damp_enabled = VLEAD_DAMP_ENABLED   # speed-damp (B) gated off; flicker-hold (A) runs alone
     self._one = _LeadHold()
     self._two = _LeadHold()
 
@@ -151,4 +157,6 @@ class RadarDistanceController:
     two = self._two.step(radarstate.leadTwo)
     if self._v_ego < LOW_SPEED_PASSTHROUGH_V:
       return radarstate
+    if not self._vlead_damp_enabled:
+      return _RadarStateProxy(one, two)                       # flicker-hold (A) only; speed-damp (B) gated off
     return _RadarStateProxy(self._one.smooth(one), self._two.smooth(two))
