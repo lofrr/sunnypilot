@@ -39,10 +39,11 @@ def make_sm(v_ego=20.0, lead_status=False, lead_d=0.0, lead_vlead=0.0):
   return {'carState': SimpleNamespace(vEgo=v_ego), 'radarState': SimpleNamespace(leadOne=lead)}
 
 
-def make_controller(enabled=True, personality=NORMAL, crash_cnt=0, comfort_stop=False):
+def make_controller(enabled=True, personality=NORMAL, crash_cnt=0, comfort_stop=False, gas_suppress=False):
   store = {"AccelPersonalityEnabled": enabled, "AccelPersonality": int(personality)}
   ctrl = AccelController(CP=SimpleNamespace(), mpc=SimpleNamespace(crash_cnt=crash_cnt), params=FakeParams(store))
   ctrl._comfort_stop_enabled = comfort_stop   # comfort_stop is gated off in production; opt in per-test
+  ctrl._gas_suppress_enabled = gas_suppress   # gas-suppression is gated off in production; opt in per-test
   ctrl.update(make_sm())
   return ctrl
 
@@ -328,6 +329,59 @@ def test_comfort_stop_releases_on_launch():
     out = ctrl.smooth_target_accel(0.8, flat_traj(0.8), T_IDXS, should_stop=False)
   assert out > 0.0                                             # launches (floor did not hold it back)
   assert ctrl._stop_floor == 0.0                               # floor fully released
+
+
+# --- gas suppression near a non-opening lead ---------------------------------
+
+def _gas(ctrl, v_ego, lead_d, lead_vlead, raw=0.4):
+  ctrl.update(make_sm(v_ego=v_ego, lead_status=True, lead_d=lead_d, lead_vlead=lead_vlead))
+  return ctrl.smooth_target_accel(raw, flat_traj(raw), T_IDXS, should_stop=False)
+
+def _brake_then(ctrl, v_ego, lead_d, lead_vlead, raw):
+  for _ in range(3):                                           # brake for the lead -> set the recency latch
+    ctrl.update(make_sm(v_ego=v_ego, lead_status=True, lead_d=lead_d, lead_vlead=lead_vlead))
+    ctrl.smooth_target_accel(-0.5, flat_traj(-0.5), T_IDXS, should_stop=False)
+  ctrl.update(make_sm(v_ego=v_ego, lead_status=True, lead_d=lead_d, lead_vlead=lead_vlead))
+  return ctrl.smooth_target_accel(raw, flat_traj(raw), T_IDXS, should_stop=False)
+
+def test_gas_suppress_T2_closing_lead_coasts():
+  # T2: clearly gaining on the lead (closing -2.5) -> suppress outright (the 0480 t448 case).
+  ctrl = make_controller(gas_suppress=True)
+  out = _gas(ctrl, v_ego=23.0, lead_d=54.0, lead_vlead=20.5)
+  assert out <= _EPS                                           # coast, never a fabricated brake
+  assert out >= -0.5 - _EPS
+
+def test_gas_suppress_T1_rebound_after_brake():
+  # T1: braked for a matched lead, then plan wants gas again within RECENT_T -> suppress the rebound (t1302 case).
+  ctrl = make_controller(gas_suppress=True)
+  out = _brake_then(ctrl, v_ego=20.0, lead_d=50.0, lead_vlead=20.0, raw=0.3)
+  assert out <= _EPS
+
+def test_gas_suppress_allows_matched_lead_without_recent_brake():
+  # The deliberate narrowing: a steady matched lead we did NOT just brake for keeps its gas (no normal-following drag).
+  ctrl = make_controller(gas_suppress=True)
+  out = _gas(ctrl, v_ego=20.0, lead_d=50.0, lead_vlead=20.0)   # closing 0, no recent brake
+  assert out > 0.0
+
+def test_gas_suppress_allows_gas_when_lead_opening():
+  ctrl = make_controller(gas_suppress=True)
+  out = _gas(ctrl, v_ego=20.0, lead_d=50.0, lead_vlead=24.0)   # lead pulling away +4 -> keep up (neither trigger)
+  assert out > 0.0
+
+def test_gas_suppress_allows_gas_when_lead_far():
+  ctrl = make_controller(gas_suppress=True)
+  out = _gas(ctrl, v_ego=23.0, lead_d=80.0, lead_vlead=20.5)   # closing -2.5 but beyond GAS_SUPPRESS_DREL -> allow
+  assert out > 0.0
+
+def test_gas_suppress_off_by_default_is_stock_gas():
+  ctrl = make_controller()                                     # gas_suppress defaults False (production)
+  out = _gas(ctrl, v_ego=23.0, lead_d=54.0, lead_vlead=20.5)
+  assert out > 0.0                                             # stock gas passes through
+
+def test_gas_suppress_does_not_touch_brake():
+  ctrl = make_controller(gas_suppress=True)
+  out = _gas(ctrl, v_ego=23.0, lead_d=54.0, lead_vlead=20.5, raw=-0.5)   # plan brakes
+  assert out <= 0.0                                            # suppression no-ops on a brake (never weakens it)
 
 
 def test_onset_spread_bounded_and_skipped_for_emergency():

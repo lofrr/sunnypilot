@@ -27,18 +27,13 @@ MIN_HELD_DREL = 0.5
 
 LOW_SPEED_PASSTHROUGH_V = 5.0   # m/s
 
-# Speed-damp (B) is gated OFF: it lags a speeding-up lead (input-side) and a prior version caused phantom
-# braking + a launch rubber-band (lead measured up to ~11 m/s slower than real). Flicker-hold (A) runs alone.
-# Flip True only behind an on-road check of a lead accelerating away above LOW_SPEED_PASSTHROUGH_V; if a
-# failure-to-release appears, prefer an output-side accel slew over re-enabling this input-side lag.
+# Speed-damp (B) gated off (caused phantom braking + launch rubber-band before); flicker-hold (A) runs alone.
 VLEAD_DAMP_ENABLED = False
 VLEAD_TAU = 0.4                 # s, lag on a speeding-up lead
 _VLEAD_ALPHA = DT_MDL / VLEAD_TAU
 SWITCH_DREL = 8.0              # m, dRel jump that means the radar switched to a different track -> reset the filter
 
-# Lead-instability detector (telemetry only, no control effect yet): flags a bimodal/bouncing radar lead --
-# the signature behind the residual goal-2 firm brakes (vLead jumping between two tracks, dRel stepping).
-# Validated on routes 047f/0480: fires 0.6-0.9% of following frames, concentrated at the firm-brake events.
+# Lead-instability detector (telemetry only): flags a bimodal/bouncing radar lead.
 STABILITY_WINDOW = 5            # frames (~0.25s @ 20Hz)
 VLEAD_SPREAD = 4.0             # m/s, vLead range over the window above which the lead is "unstable"
 
@@ -132,9 +127,7 @@ class _LeadHold:
 
 
 class _LeadStability:
-  # Read-only lead-quality monitor. Watches raw leadOne for the bimodal/bouncing signature (vLead range over a
-  # short window, or repeated dRel track-switch jumps). Pure telemetry -- it conditions nothing, just reports a
-  # flag so we can size how often the residual firm brakes are radar-instability driven before building a fix.
+  # Read-only monitor: flags a bimodal/bouncing leadOne (vLead range, or repeated dRel track-switches). Telemetry.
   def __init__(self):
     self._v = deque(maxlen=STABILITY_WINDOW)
     self._d = deque(maxlen=STABILITY_WINDOW)
@@ -166,10 +159,10 @@ class RadarDistanceController:
     self._frame = 0
     self._v_ego = 0.0
     self._enabled = self._params.get_bool("RadarDistance")
-    self._vlead_damp_enabled = VLEAD_DAMP_ENABLED   # speed-damp (B) gated off; flicker-hold (A) runs alone
+    self._vlead_damp_enabled = VLEAD_DAMP_ENABLED
     self._one = _LeadHold()
     self._two = _LeadHold()
-    self._stability = _LeadStability()   # lead-instability telemetry (informational, no control effect)
+    self._stability = _LeadStability()
 
   def _read_params(self) -> None:
     enabled = self._params.get_bool("RadarDistance")
@@ -191,7 +184,7 @@ class RadarDistanceController:
     return self._stability.unstable
 
   def smooth_radarstate(self, radarstate):
-    self._stability.update(radarstate.leadOne, self._v_ego)   # telemetry; runs every cycle, even when disabled
+    self._stability.update(radarstate.leadOne, self._v_ego)   # telemetry, runs every cycle
     if not self._enabled:
       return radarstate
     one = self._one.step(radarstate.leadOne)
@@ -199,5 +192,5 @@ class RadarDistanceController:
     if self._v_ego < LOW_SPEED_PASSTHROUGH_V:
       return radarstate
     if not self._vlead_damp_enabled:
-      return _RadarStateProxy(one, two)                       # flicker-hold (A) only; speed-damp (B) gated off
+      return _RadarStateProxy(one, two)                       # flicker-hold (A) only
     return _RadarStateProxy(self._one.smooth(one), self._two.smooth(two))
