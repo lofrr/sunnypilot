@@ -42,9 +42,9 @@ def test_dec_model_stop_target_not_reintroduced():
         assert token not in src, f"reverted DEC model-stop-target ({token}) re-introduced in {path}"
 
 
-def test_comfort_stop_and_vlead_damp_gated_off():
-  # Strategy invariants (tn @ 2026-06-26): final-approach stop passes through stock (goal 6 stock-met), and the
-  # input-side vLead speed-damp (B) stays off pending on-road proof. Flicker-hold (A) is unaffected by either.
+def test_long_feature_gates():
+  # comfort_stop OFF: keep the stock smooth taper (flat-hold firms the end); farther-stop comes from the MPC
+  # stop-target shift instead. vLead speed-damp (B) stays OFF pending on-road proof.
   from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import COMFORT_STOP_ENABLED
   from openpilot.sunnypilot.selfdrive.controls.lib.radar_distance.radar_distance import VLEAD_DAMP_ENABLED
 

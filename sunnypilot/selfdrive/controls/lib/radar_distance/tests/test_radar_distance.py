@@ -23,9 +23,9 @@ class FakeParams:
     return bool(self.store.get(key, False))
 
 
-def lead(status=True, dRel=40.0, vRel=-2.0, vLead=18.0, aLeadK=0.0, aLeadTau=1.5, modelProb=0.95):
+def lead(status=True, dRel=40.0, vRel=-2.0, vLead=18.0, aLeadK=0.0, aLeadTau=1.5, modelProb=0.95, radarTrackId=-1):
   return SimpleNamespace(status=status, dRel=dRel, yRel=0.0, vRel=vRel, vLead=vLead, vLeadK=vLead,
-                         aLeadK=aLeadK, aLeadTau=aLeadTau, modelProb=modelProb)
+                         aLeadK=aLeadK, aLeadTau=aLeadTau, modelProb=modelProb, radarTrackId=radarTrackId)
 
 
 def rs(one, two=None):
@@ -163,6 +163,96 @@ def test_stability_runs_even_when_disabled():
   for v in (12.0, 2.0, 12.0, 2.0, 12.0):
     c.smooth_radarstate(rs(lead(dRel=60.0, vLead=v)))
   assert c.lead_unstable()
+
+def test_stability_flags_trackid_churn():
+  c = ctrl()
+  for tid in (10, 20, 10, 20, 10, 20, 10, 20, 10, 20):         # steady lead, radarTrackId flipping (follow-hunt)
+    c.smooth_radarstate(rs(lead(dRel=44.0, vLead=27.0, radarTrackId=tid)))
+  assert c.lead_unstable()
+
+def test_stability_steady_id_quiet():
+  c = ctrl()
+  for _ in range(10):
+    c.smooth_radarstate(rs(lead(dRel=44.0, vLead=27.0, radarTrackId=10)))
+  assert not c.lead_unstable()                                 # steady lead + steady id -> stable
+
+
+# --- lead jitter smoother (B2: anti follow-hunt) -----------------------------
+
+def _churn_feed(c, n=20):
+  out = []
+  for k in range(n):
+    dr = 42.0 if k % 2 == 0 else 46.0                          # steady ~44m lead, dRel jitter
+    tid = 10 if k % 2 == 0 else 20                             # radarTrackId churning
+    out.append(c.smooth_radarstate(rs(lead(dRel=dr, vLead=27.0, vRel=0.0, radarTrackId=tid))).leadOne.dRel)
+  return out
+
+def test_lead_smooth_removes_churn_jitter():
+  c = ctrl()
+  c._lead_smooth_enabled = True
+  tail = _churn_feed(c)[12:]
+  assert max(tail) - min(tail) < 3.0                           # raw range is 4.0 -> jitter reduced
+  assert all(42.5 < x < 45.5 for x in tail)                   # pulled toward the mean ~44
+
+def test_lead_smooth_off_passthrough():
+  c = ctrl()                                                   # smoother off (default)
+  tail = _churn_feed(c)[12:]
+  assert {round(x, 1) for x in tail} <= {42.0, 46.0}           # raw dRel, no smoothing
+
+def test_lead_smooth_inactive_without_churn():
+  c = ctrl()
+  c._lead_smooth_enabled = True
+  out = None
+  for _ in range(12):
+    out = c.smooth_radarstate(rs(lead(dRel=44.0, vLead=27.0, radarTrackId=10)))   # steady id -> no churn
+  assert out.leadOne.dRel == pytest.approx(44.0, abs=1e-6)     # smoother inactive -> exact dRel
+
+
+# --- stop-gap bias (smooth farther stop) -------------------------------------
+
+def _biased_ctrl(v_ego=2.0):
+  c = ctrl()
+  c._stop_gap_bias_enabled = True
+  c._v_ego = v_ego
+  return c
+
+def _bias(c, dRel, vLead):
+  return c._stop_gap_bias(lead(dRel=dRel, vLead=vLead))
+
+def test_stop_bias_pulls_stopped_lead_closer():
+  out = _bias(_biased_ctrl(), 8.0, 0.0)
+  assert 2.0 <= out.dRel < 8.0                                 # reported closer (farther stop), floored
+  assert out.vLead == 0.0 and out.status                       # other fields preserved
+
+def test_stop_bias_monotone_never_farther():
+  c = _biased_ctrl()
+  for dr in (4.0, 6.0, 8.0, 10.0, 12.0, 20.0):
+    assert _bias(c, dr, 0.0).dRel <= dr + 1e-6
+
+def test_stop_bias_min_floor():
+  assert _bias(_biased_ctrl(), 2.5, 0.0).dRel == pytest.approx(2.0, abs=1e-6)
+
+def test_stop_bias_off_no_change():
+  c = ctrl()
+  c._v_ego = 2.0
+  ld = lead(dRel=8.0, vLead=0.0)
+  assert c._stop_gap_bias(ld) is ld                            # default off -> exact passthrough
+
+def test_stop_bias_moving_lead_no_change():
+  ld = lead(dRel=8.0, vLead=5.0)
+  assert _biased_ctrl()._stop_gap_bias(ld) is ld
+
+def test_stop_bias_high_speed_no_change():
+  ld = lead(dRel=8.0, vLead=0.0)
+  assert _biased_ctrl(v_ego=15.0)._stop_gap_bias(ld) is ld
+
+def test_stop_bias_far_lead_no_change():
+  ld = lead(dRel=30.0, vLead=0.0)
+  assert _biased_ctrl()._stop_gap_bias(ld) is ld               # beyond regime -> no bias
+
+def test_stop_bias_via_smooth_radarstate_low_speed():
+  out = _biased_ctrl().smooth_radarstate(rs(lead(dRel=8.0, vLead=0.0, vRel=-2.0)))
+  assert out.leadOne.dRel < 8.0                                # biased proxy returned at low speed
 
 
 def test_obstacle_monotone_during_hold():

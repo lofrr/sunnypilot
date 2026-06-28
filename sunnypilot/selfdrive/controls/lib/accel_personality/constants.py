@@ -79,7 +79,7 @@ ONSET_SPREAD_JERK = 2.5           # m/s^3: rate the spread output deepens back t
 # (cruising / gap opening as a creeping lead pulls away / lead moving / launch) the floor eases out at the
 # release rate. min(plan, floor) keeps it never weaker than the plan. Replaces the old kinematic v^2/(2*gap)
 # enforcer, which engaged late and demanded a firm ~-1.6 grab to hit a fixed gap. Off => no-op.
-COMFORT_STOP_ENABLED = False      # gated off: final-approach stops pass through stock
+COMFORT_STOP_ENABLED = False      # off: keeps the stock smooth taper (flat-hold firms the end). Farther-stop is via the MPC stop-target shift, not this.
 COMFORT_STOP_V = 4.0              # m/s: only engage at/below this ego speed
 COMFORT_STOP_LEAD_V = 1.0         # m/s: only behind a (near-)stopped lead
 COMFORT_STOP_GAP = 5.0            # m: reference standstill gap (radar dRel) for the final-approach window

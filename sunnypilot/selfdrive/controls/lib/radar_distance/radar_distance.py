@@ -36,6 +36,27 @@ SWITCH_DREL = 8.0              # m, dRel jump that means the radar switched to a
 # Lead-instability detector (telemetry only): flags a bimodal/bouncing radar lead.
 STABILITY_WINDOW = 5            # frames (~0.25s @ 20Hz)
 VLEAD_SPREAD = 4.0             # m/s, vLead range over the window above which the lead is "unstable"
+ID_CHURN_WINDOW = 10           # frames (~0.5s) for radarTrackId-churn detection (steady lead, flipping track ids)
+ID_CHURN = 3                   # trackId switches in the window above which the lead is "unstable" (follow-hunting)
+
+# Lead jitter smoother (B2): during trackId churn the per-track dRel/vRel jitter makes the MPC hunt the follow
+# gap. A short SYMMETRIC EMA on the churning lead removes the jitter so the MPC sees a steady lead and stops
+# hunting. Active ONLY during churn (NOT bimodal vLead -> never averages two real tracks). Bounded symmetric
+# lag ~LEAD_SMOOTH_TAU. Gated OFF by default.
+LEAD_SMOOTH_ENABLED = False
+LEAD_SMOOTH_TAU = 0.5          # s, EMA time constant
+LEAD_SMOOTH_HOLD = 20          # frames (~1s): keep smoothing through brief churn gaps (churn toggles on/off)
+
+# Stop-gap bias: near a (near-)stopped lead at low speed, report dRel up to STOP_GAP_BIAS_M closer so the MPC
+# runs its own smooth stop but terminates that much farther back (stock crawl-creeps to ~2m). Monotone (closer
+# => brake >= stock). Ramps in over the regime edge and out as the lead moves (no step, releases on launch).
+STOP_GAP_BIAS_ENABLED = False
+STOP_GAP_BIAS_M = 2.0          # m: max dRel reduction = added standstill gap
+STOP_BIAS_VEGO = 8.0           # m/s: only below this ego speed
+STOP_BIAS_VLEAD = 1.5         # m/s: only behind a (near-)stopped lead; ramps out as vLead rises to this
+STOP_BIAS_REGIME_DREL = 12.0   # m: bias ramps in below this dRel
+STOP_BIAS_RAMP_BAND = 2.0     # m: ramp-in band (full offset below REGIME_DREL - RAMP_BAND)
+STOP_BIAS_MIN_DREL = 2.0      # m: never report a lead closer than this
 
 
 class _LeadView:
@@ -51,6 +72,66 @@ class _LeadView:
     self.aLeadK = src.aLeadK
     self.aLeadTau = src.aLeadTau
     self.modelProb = src.modelProb
+
+
+class _BiasedLead:
+  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'vLeadK', 'aLeadK', 'aLeadTau', 'modelProb')
+
+  def __init__(self, src, dRel):
+    self.status = src.status
+    self.dRel = dRel
+    self.yRel = src.yRel
+    self.vRel = src.vRel
+    self.vLead = src.vLead
+    self.vLeadK = src.vLeadK
+    self.aLeadK = src.aLeadK
+    self.aLeadTau = src.aLeadTau
+    self.modelProb = src.modelProb
+
+
+class _SmoothedLead:
+  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'vLeadK', 'aLeadK', 'aLeadTau', 'modelProb')
+
+  def __init__(self, src, dRel, vLead, vRel):
+    self.status = src.status
+    self.dRel = dRel
+    self.yRel = src.yRel
+    self.vRel = vRel
+    self.vLead = vLead
+    self.vLeadK = vLead
+    self.aLeadK = src.aLeadK
+    self.aLeadTau = src.aLeadTau
+    self.modelProb = src.modelProb
+
+
+class _LeadSmoother:
+  # Short symmetric EMA on a churning lead's dRel/vLead/vRel (jitter removal). A hold keeps it active through
+  # brief churn gaps (churn toggles); passthrough + reset only after the hold lapses.
+  def __init__(self):
+    self._d = None
+    self._vl = None
+    self._vr = None
+    self._hold = 0
+
+  def reset(self):
+    self._d = None
+    self._vl = None
+    self._vr = None
+    self._hold = 0
+
+  def update(self, lead, churn: bool):
+    self._hold = LEAD_SMOOTH_HOLD if churn else self._hold - 1
+    if self._hold <= 0 or not lead.status:
+      self.reset()
+      return lead
+    if self._d is None:
+      self._d, self._vl, self._vr = lead.dRel, lead.vLead, lead.vRel
+      return lead
+    a = DT_MDL / LEAD_SMOOTH_TAU
+    self._d += (lead.dRel - self._d) * a
+    self._vl += (lead.vLead - self._vl) * a
+    self._vr += (lead.vRel - self._vr) * a
+    return _SmoothedLead(lead, self._d, self._vl, self._vr)
 
 
 class _HeldLead:
@@ -127,16 +208,21 @@ class _LeadHold:
 
 
 class _LeadStability:
-  # Read-only monitor: flags a bimodal/bouncing leadOne (vLead range, or repeated dRel track-switches). Telemetry.
+  # Read-only monitor: flags an unstable leadOne -- bimodal/bouncing vLead, dRel track-switch jumps, or
+  # radarTrackId churn (a steady lead flipping track ids -> vRel jitter -> follow-hunting). Telemetry only.
   def __init__(self):
     self._v = deque(maxlen=STABILITY_WINDOW)
     self._d = deque(maxlen=STABILITY_WINDOW)
+    self._id = deque(maxlen=ID_CHURN_WINDOW)
     self.unstable = False
+    self.churn = False
 
   def reset(self):
     self._v.clear()
     self._d.clear()
+    self._id.clear()
     self.unstable = False
+    self.churn = False
 
   def update(self, lead, v_ego: float) -> None:
     if not lead.status or v_ego < LOW_SPEED_PASSTHROUGH_V:
@@ -144,12 +230,16 @@ class _LeadStability:
       return
     self._v.append(float(lead.vLead))
     self._d.append(float(lead.dRel))
+    self._id.append(int(getattr(lead, 'radarTrackId', -1)))
     if len(self._v) < STABILITY_WINDOW:
       self.unstable = False
       return
     v_spread = max(self._v) - min(self._v)
     d_jumps = sum(abs(b - a) > SWITCH_DREL for a, b in zip(self._d, list(self._d)[1:], strict=False))
-    self.unstable = v_spread > VLEAD_SPREAD or d_jumps >= 2
+    ids = list(self._id)
+    id_churn = sum(1 for a, b in zip(ids, ids[1:], strict=False) if a != b and a > 0 and b > 0)
+    self.churn = id_churn >= ID_CHURN and v_spread <= VLEAD_SPREAD   # steady lead, flipping ids (not bimodal)
+    self.unstable = v_spread > VLEAD_SPREAD or d_jumps >= 2 or self.churn
 
 
 class RadarDistanceController:
@@ -160,9 +250,12 @@ class RadarDistanceController:
     self._v_ego = 0.0
     self._enabled = self._params.get_bool("RadarDistance")
     self._vlead_damp_enabled = VLEAD_DAMP_ENABLED
+    self._stop_gap_bias_enabled = STOP_GAP_BIAS_ENABLED
+    self._lead_smooth_enabled = LEAD_SMOOTH_ENABLED
     self._one = _LeadHold()
     self._two = _LeadHold()
     self._stability = _LeadStability()
+    self._smoother = _LeadSmoother()
 
   def _read_params(self) -> None:
     enabled = self._params.get_bool("RadarDistance")
@@ -183,6 +276,20 @@ class RadarDistanceController:
   def lead_unstable(self) -> bool:
     return self._stability.unstable
 
+  def _stop_gap_bias(self, lead):
+    # Report a (near-)stopped lead up to STOP_GAP_BIAS_M closer at low speed, so the MPC's own smooth stop ends
+    # that much farther back. Monotone (only ever reports closer). No-op outside the regime / when disabled.
+    if not self._stop_gap_bias_enabled or not lead.status:
+      return lead
+    if lead.vLead > STOP_BIAS_VLEAD or self._v_ego > STOP_BIAS_VEGO or lead.dRel <= STOP_BIAS_MIN_DREL:
+      return lead
+    d_ramp = min(max((STOP_BIAS_REGIME_DREL - lead.dRel) / STOP_BIAS_RAMP_BAND, 0.0), 1.0)
+    v_ramp = min(max((STOP_BIAS_VLEAD - lead.vLead) / STOP_BIAS_VLEAD, 0.0), 1.0)
+    offset = STOP_GAP_BIAS_M * d_ramp * v_ramp
+    if offset < 0.05:
+      return lead
+    return _BiasedLead(lead, max(lead.dRel - offset, STOP_BIAS_MIN_DREL))
+
   def smooth_radarstate(self, radarstate):
     self._stability.update(radarstate.leadOne, self._v_ego)   # telemetry, runs every cycle
     if not self._enabled:
@@ -190,7 +297,11 @@ class RadarDistanceController:
     one = self._one.step(radarstate.leadOne)
     two = self._two.step(radarstate.leadTwo)
     if self._v_ego < LOW_SPEED_PASSTHROUGH_V:
-      return radarstate
+      one_b = self._stop_gap_bias(radarstate.leadOne)         # low speed = stock lead, only the stop-gap bias
+      return radarstate if one_b is radarstate.leadOne else _RadarStateProxy(one_b, radarstate.leadTwo)
+    one = self._stop_gap_bias(one)
+    if self._lead_smooth_enabled:
+      one = self._smoother.update(one, self._stability.churn)  # de-jitter a churning lead (anti follow-hunt)
     if not self._vlead_damp_enabled:
       return _RadarStateProxy(one, two)                       # flicker-hold (A) only
     return _RadarStateProxy(self._one.smooth(one), self._two.smooth(two))
