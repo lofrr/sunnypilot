@@ -39,11 +39,12 @@ def make_sm(v_ego=20.0, lead_status=False, lead_d=0.0, lead_vlead=0.0):
   return {'carState': SimpleNamespace(vEgo=v_ego), 'radarState': SimpleNamespace(leadOne=lead)}
 
 
-def make_controller(enabled=True, personality=NORMAL, crash_cnt=0, comfort_stop=False, gas_suppress=False):
+def make_controller(enabled=True, personality=NORMAL, crash_cnt=0, comfort_stop=False, gas_suppress=False, physics_cap=False):
   store = {"AccelPersonalityEnabled": enabled, "AccelPersonality": int(personality)}
   ctrl = AccelController(CP=SimpleNamespace(), mpc=SimpleNamespace(crash_cnt=crash_cnt), params=FakeParams(store))
   ctrl._comfort_stop_enabled = comfort_stop   # comfort_stop is gated off in production; opt in per-test
   ctrl._gas_suppress_enabled = gas_suppress   # gas-suppression is gated off in production; opt in per-test
+  ctrl._physics_cap_enabled = physics_cap     # physics decel cap is gated off in production; opt in per-test
   ctrl.update(make_sm())
   return ctrl
 
@@ -382,6 +383,39 @@ def test_gas_suppress_does_not_touch_brake():
   ctrl = make_controller(gas_suppress=True)
   out = _gas(ctrl, v_ego=23.0, lead_d=54.0, lead_vlead=20.5, raw=-0.5)   # plan brakes
   assert out <= 0.0                                            # suppression no-ops on a brake (never weakens it)
+
+
+# --- physics decel cap (no over-brake on a roomy closing lead) ---------------
+
+def _closing(ctrl, v_ego, lead_d, lead_vlead, raw):
+  ctrl.update(make_sm(v_ego=v_ego, lead_status=True, lead_d=lead_d, lead_vlead=lead_vlead))
+  return ctrl.smooth_target_accel(raw, flat_traj(raw), T_IDXS, should_stop=False)
+
+def test_physics_cap_softens_roomy_overbrake():
+  # the 0488 t600 case: lead 84m, 23.7 m/s, ego 34.7 (vRel -11, TTC 7.6s). -2.8 over-brakes; physics ~ -1.7.
+  out = _closing(make_controller(physics_cap=True), 34.7, 84.0, 23.7, -2.8)
+  assert -2.1 < out < -1.2
+
+def test_physics_cap_never_touches_close_lead():
+  out = _closing(make_controller(physics_cap=True), 20.0, 18.0, 9.0, -2.8)   # dRel < MIN_DREL
+  assert out == pytest.approx(-2.8, abs=_EPS)
+
+def test_physics_cap_never_touches_low_ttc():
+  out = _closing(make_controller(physics_cap=True), 30.0, 35.0, 5.0, -2.8)   # vRel -25 -> TTC ~1.4s
+  assert out == pytest.approx(-2.8, abs=_EPS)
+
+def test_physics_cap_off_passthrough():
+  out = _closing(make_controller(), 34.7, 84.0, 23.7, -2.8)                  # default off
+  assert out == pytest.approx(-2.8, abs=_EPS)
+
+def test_physics_cap_only_softens_never_hardens():
+  out = _closing(make_controller(physics_cap=True), 34.7, 84.0, 23.7, -0.5)  # already gentler than physics
+  assert out > -1.5                                                          # cap does not deepen it
+
+def test_physics_cap_skips_brake_not_from_lead():
+  # barely-closing far lead (vRel -1) but a real -1.5 brake (curve/vision/closer lead): a_phys ~ 0 -> don't cap.
+  out = _closing(make_controller(physics_cap=True), 34.0, 100.0, 33.0, -1.5)
+  assert out == pytest.approx(-1.5, abs=_EPS)
 
 
 def test_onset_spread_bounded_and_skipped_for_emergency():

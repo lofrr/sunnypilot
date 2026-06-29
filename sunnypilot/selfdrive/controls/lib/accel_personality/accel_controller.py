@@ -31,7 +31,9 @@ from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants imp
   COMFORT_STOP_ENABLED, COMFORT_STOP_V, COMFORT_STOP_LEAD_V, COMFORT_STOP_GAP, \
   COMFORT_STOP_MAX_DECEL, COMFORT_STOP_RELEASE_V, COMFORT_STOP_HOLD_GAP, \
   GAS_SUPPRESS_ENABLED, GAS_SUPPRESS_DREL, GAS_SUPPRESS_VREL, GAS_SUPPRESS_CLOSE, \
-  GAS_SUPPRESS_RECENT_T, GAS_SUPPRESS_BRAKE_THR
+  GAS_SUPPRESS_RECENT_T, GAS_SUPPRESS_BRAKE_THR, \
+  PHYSICS_CAP_ENABLED, PHYS_CAP_MIN_TTC, PHYS_CAP_MIN_DREL, PHYS_CAP_TGAP, PHYS_CAP_MIN_GAP, PHYS_CAP_VREL_MARGIN, \
+  PHYS_CAP_FORGET_T, PHYS_CAP_MIN_A
 
 _ZERO_ACCEL_EPS = 1e-6
 
@@ -56,6 +58,10 @@ class AccelController:
     self._stop_floor = 0.0       # comfort-stop floor latch (monotone within a stop episode, eased on release)
     self._comfort_stop_enabled = COMFORT_STOP_ENABLED
     self._gas_suppress_enabled = GAS_SUPPRESS_ENABLED
+    self._physics_cap_enabled = PHYSICS_CAP_ENABLED
+    self._cap_vrel = 0.0                                 # held worst-case (most-closing) lead for the physics cap
+    self._cap_dRel = 1e9
+    self._cap_vlead = 0.0
     self._since_brake_frames = 10 ** 6                   # frames since last brake output (gas-suppress recency)
     self._read_params()
 
@@ -99,6 +105,7 @@ class AccelController:
 
     out = self._shape(raw, should_stop, reset, speed_trajectory, t_idxs, stock_brake)
     out = self._comfort_stop(out, reset)   # low-speed monotone comfort decel-to-stop (replaces the self-releasing enforcer)
+    out = self._physics_decel_cap(out, reset)   # don't over-brake a closing lead that has room (brakes < stock)
     return self._finalize(out)
 
   def _shape(self, raw: float, should_stop: bool, reset: bool, speed_trajectory, t_idxs, stock_brake: bool) -> float:
@@ -127,6 +134,37 @@ class AccelController:
     if stock_brake:
       return min(slewed, raw)                                  # blended/e2e: the model owns the brake -> strict never-weaker
     return self._onset_spread(slewed, raw)                     # non-emergency brake: bounded onset spread (<= ONSET_SPREAD_MAX weaker)
+
+  def _physics_decel_cap(self, out: float, reset: bool) -> float:
+    # On a closing lead with genuine room, cap the brake at the kinematic decel needed to settle at a comfortable
+    # gap -- the stock MPC over-brakes a slower lead at speed. Only softens (max(out, a_phys)). Uses a HELD
+    # worst-case closing (decaying ~PHYS_CAP_FORGET_T) so a benign lead-flicker frame cannot relax it, and only
+    # acts when the closing itself warrants a real brake (a_phys <= PHYS_CAP_MIN_A) so it never softens a brake
+    # meant for another cause (curve / vision / a closer lead). Guarded to TTC + distance, pessimistic vRel
+    # margin, self-disengaging as room shrinks (full stock brake returns).
+    if reset or not self._lead_status:
+      self._cap_vrel, self._cap_dRel, self._cap_vlead = 0.0, 1e9, 0.0
+    else:
+      vrel = self._lead_vlead - self._v_ego
+      if vrel < self._cap_vrel:                                # adopt a more-closing lead immediately
+        self._cap_vrel, self._cap_dRel, self._cap_vlead = vrel, self._lead_d, self._lead_vlead
+      else:                                                    # forget an old threat slowly
+        f = DT_MDL / PHYS_CAP_FORGET_T
+        self._cap_vrel += (vrel - self._cap_vrel) * f
+        self._cap_dRel += (self._lead_d - self._cap_dRel) * f
+        self._cap_vlead += (self._lead_vlead - self._cap_vlead) * f
+    if not self._enabled or not self._physics_cap_enabled or out >= 0.0 or not self._lead_status:
+      return out
+    hv, hd, hl = self._cap_vrel, self._cap_dRel, self._cap_vlead
+    if hv >= -0.5 or hd < PHYS_CAP_MIN_DREL or hd / -hv < PHYS_CAP_MIN_TTC:
+      return out
+    room = hd - max(PHYS_CAP_MIN_GAP, PHYS_CAP_TGAP * hl)
+    if room <= 1.0:
+      return out
+    a_phys = -((hv - PHYS_CAP_VREL_MARGIN) ** 2) / (2.0 * room)
+    if a_phys > PHYS_CAP_MIN_A:                                # lead-closing alone does not warrant a real brake
+      return out
+    return max(out, a_phys)                                    # only ever softens; never below the needed decel
 
   def _suppress_gas_near_lead(self, target: float, raw: float) -> float:
     # Coast instead of accelerating toward a close lead: T1 recent brake + lead not pulling away, or T2 clearly

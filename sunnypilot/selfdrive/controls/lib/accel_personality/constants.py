@@ -91,6 +91,20 @@ COMFORT_STOP_HOLD_GAP = 2.0       # m: within this of the reference gap = final-
 # Gas suppression near a lead: coast instead of accelerating toward a close lead, in two cases (OR) --
 # T1 we braked for it within RECENT_T and it is still not pulling away (closing < VREL); T2 we are clearly
 # gaining on it (closing < CLOSE). Only reduces accel, never a brake; opening/far lead keeps its gas.
+# Physics decel cap: on a closing lead with genuine room, don't brake HARDER than kinematics require to settle
+# at a comfortable gap (stock MPC over-brakes a slower lead at high speed via its big comfort-distance cost).
+# The ONLY feature that brakes LESS than stock -- guarded to roomy situations (TTC + distance), pessimistic
+# vRel margin, self-disengaging as room shrinks (full stock brake returns). Gated OFF by default.
+PHYSICS_CAP_ENABLED = False
+PHYS_CAP_MIN_TTC = 4.0            # s: only cap when TTC above this (room to brake gently)
+PHYS_CAP_MIN_DREL = 30.0         # m: only cap when the lead is farther than this
+PHYS_CAP_TGAP = 1.6              # s: target time-gap to settle at
+PHYS_CAP_MIN_GAP = 20.0          # m: floor on the target gap
+PHYS_CAP_VREL_MARGIN = 1.5       # m/s: treat the lead as closing this much faster (pessimistic -> firmer cap)
+PHYS_CAP_FORGET_T = 1.0          # s: decay of the held worst-case closing (a benign flicker frame cannot relax the cap)
+PHYS_CAP_MIN_A = -0.5            # m/s^2: only cap if the closing lead itself warrants at least this brake
+                                 # (else the brake is for another cause -- curve / vision / a closer lead -- leave it)
+
 GAS_SUPPRESS_ENABLED = False
 GAS_SUPPRESS_DREL = 60.0          # m: lead within this distance
 GAS_SUPPRESS_VREL = 0.5           # m/s: "not pulling away" bound for the rebound trigger (vLead - vEgo)
