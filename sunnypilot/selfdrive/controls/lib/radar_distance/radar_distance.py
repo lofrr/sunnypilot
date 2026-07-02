@@ -4,15 +4,15 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-RadarDistance de-noises the lead the longitudinal MPC follows on a noisy (TSS2-class) radar. It NEVER
-reports a farther-or-faster lead than reality, so braking is always >= stock, and it changes nothing about
-the desired gap -- that is the AccelController's job (t_follow). Two mechanisms only:
+RadarDistance conditions the lead the longitudinal MPC follows on a noisy (TSS2-class) radar. It NEVER
+reports a farther-or-faster lead than reality, so braking is always >= stock. Three mechanisms:
   * flicker-hold: keep a just-dropped, recently-sustained lead alive (dead-reckoned) through a brief radar
     dropout so the MPC does not lose and re-grab it (which reads as a phantom release then a catch-up brake);
   * churn smoother: a short SYMMETRIC EMA on a trackId-churning lead's dRel/vLead/vRel so the MPC stops
-    hunting the gap (removes the follow-jitter that reads as rubber-banding).
-Also publishes a read-only lead-instability flag (telemetry). Below LOW_SPEED_PASSTHROUGH_V it is a
-byte-stock passthrough (stop distance stays exactly stock). Disabled => byte-stock passthrough always.
+    hunting the gap (removes the follow-jitter that reads as rubber-banding);
+  * stop-gap: near a (near-)stopped lead at low speed report dRel a touch closer so the MPC's own smooth stop
+    settles farther back (the Prius TSS2 stock crawl creeps in to ~1.5 m). Monotone (closer => brake >= stock).
+Also publishes a read-only lead-instability flag (telemetry). Disabled => byte-stock passthrough always.
 """
 
 from collections import deque
@@ -44,6 +44,32 @@ ID_CHURN = 3                 # trackId switches in the window above which the le
 # during churn (NOT bimodal vLead -> never averages two real tracks). Bounded symmetric lag ~LEAD_SMOOTH_TAU.
 LEAD_SMOOTH_TAU = 0.5          # s, EMA time constant
 LEAD_SMOOTH_HOLD = 20          # frames (~1s): keep smoothing through brief churn gaps (churn toggles on/off)
+
+# Stop-gap: near a (near-)stopped lead at low speed, report dRel up to STOP_GAP_M closer so the MPC's own
+# smooth stop terminates that much farther back (stock Prius crawl-creeps to ~1.5 m). Monotone (only reports
+# closer => brake >= stock). Ramps in below the regime dRel and out as the lead starts moving; releases on
+# launch as ego speed rises past STOP_GAP_VEGO.
+STOP_GAP_M = 2.5               # m: max dRel reduction = added standstill gap
+STOP_GAP_VEGO = 8.0            # m/s: only below this ego speed
+STOP_GAP_VLEAD = 1.5           # m/s: only behind a (near-)stopped lead; ramps out as vLead rises to this
+STOP_GAP_REGIME_DREL = 12.0    # m: bias ramps in below this dRel
+STOP_GAP_RAMP_BAND = 2.0       # m: ramp-in band (full offset below REGIME_DREL - RAMP_BAND)
+STOP_GAP_MIN_DREL = 2.0        # m: never report a lead closer than this
+
+
+class _BiasedLead:
+  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'vLeadK', 'aLeadK', 'aLeadTau', 'modelProb')
+
+  def __init__(self, src, dRel):
+    self.status = src.status
+    self.dRel = dRel
+    self.yRel = src.yRel
+    self.vRel = src.vRel
+    self.vLead = src.vLead
+    self.vLeadK = src.vLeadK
+    self.aLeadK = src.aLeadK
+    self.aLeadTau = src.aLeadTau
+    self.modelProb = src.modelProb
 
 
 class _SmoothedLead:
@@ -214,16 +240,33 @@ class RadarDistanceController:
   def lead_unstable(self) -> bool:
     return self._stability.unstable
 
+  def _stop_gap_bias(self, lead):
+    # Report a (near-)stopped lead up to STOP_GAP_M closer at low speed so the MPC's own smooth stop ends
+    # that much farther back. Monotone (only ever reports closer). No-op outside the regime.
+    if not lead.status or lead.vLead > STOP_GAP_VLEAD or self._v_ego > STOP_GAP_VEGO or lead.dRel <= STOP_GAP_MIN_DREL:
+      return lead
+    d_ramp = min(max((STOP_GAP_REGIME_DREL - lead.dRel) / STOP_GAP_RAMP_BAND, 0.0), 1.0)
+    v_ramp = min(max((STOP_GAP_VLEAD - lead.vLead) / STOP_GAP_VLEAD, 0.0), 1.0)
+    offset = STOP_GAP_M * d_ramp * v_ramp
+    if offset < 0.05:
+      return lead
+    return _BiasedLead(lead, max(lead.dRel - offset, STOP_GAP_MIN_DREL))
+
   def smooth_radarstate(self, radarstate):
     self._stability.update(radarstate.leadOne, self._v_ego)   # telemetry, runs every cycle
-    if not self._enabled or self._v_ego < CREEP_PASSTHROUGH_V:
-      return radarstate                                       # off / full standstill: byte-stock (stock stop)
-    if self._v_ego < LOW_SPEED_PASSTHROUGH_V:
-      # creep band: churn de-jitter ONLY (symmetric EMA, mean-preserving), no flicker-hold. Smooths the
-      # radar jitter that makes stop-and-go feel like gas-brake-gas-brake, without holding a stale lead.
+    if not self._enabled:
+      return radarstate                                       # off: byte-stock passthrough
+    two = radarstate.leadTwo
+    if self._v_ego >= LOW_SPEED_PASSTHROUGH_V:
+      one = self._one.step(radarstate.leadOne)                # flicker-hold ...
+      two = self._two.step(radarstate.leadTwo)
+      one = self._smoother.update(one, self._stability.churn) # ... + churn de-jitter (anti follow-hunt)
+    elif self._v_ego >= CREEP_PASSTHROUGH_V:
+      # creep band: churn de-jitter ONLY (symmetric EMA), no flicker-hold (a stale held lead would delay launch)
       one = self._smoother.update(radarstate.leadOne, self._stability.churn)
-      return radarstate if one is radarstate.leadOne else _RadarStateProxy(one, radarstate.leadTwo)
-    one = self._one.step(radarstate.leadOne)                  # >= LOW_SPEED: flicker-hold ...
-    two = self._two.step(radarstate.leadTwo)
-    one = self._smoother.update(one, self._stability.churn)   # ... + churn de-jitter (anti follow-hunt)
+    else:
+      one = radarstate.leadOne                                # full standstill: no hold/smoothing
+    one = self._stop_gap_bias(one)                            # low-speed near-stopped: settle farther back
+    if one is radarstate.leadOne and two is radarstate.leadTwo:
+      return radarstate                                       # nothing changed -> byte-stock object
     return _RadarStateProxy(one, two)

@@ -15,7 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 from openpilot.sunnypilot.selfdrive.controls.lib.radar_distance.radar_distance import \
-  RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, LOW_SPEED_PASSTHROUGH_V, CREEP_PASSTHROUGH_V, DROPOUT_DREL
+  RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, LOW_SPEED_PASSTHROUGH_V, CREEP_PASSTHROUGH_V, \
+  DROPOUT_DREL, STOP_GAP_MIN_DREL, STOP_GAP_VEGO, STOP_GAP_VLEAD, STOP_GAP_REGIME_DREL
 
 COMFORT_BRAKE = 2.5
 
@@ -70,20 +71,21 @@ def test_valid_lead_passthrough():
   assert out.leadOne is one                          # clean lead, no churn -> unchanged
 
 
-def test_full_standstill_returns_raw_object():
-  # Full standstill (< CREEP_PASSTHROUGH_V): ENABLED returns the EXACT raw radarstate object (byte-identical
-  # to OFF) so the stock stop distance is preserved and no stale lead is held near a stop.
+def test_full_standstill_outside_stopgap_is_passthrough():
+  # Full standstill (< CREEP_PASSTHROUGH_V), lead OUTSIDE the stop-gap regime (far): no hold, no smoothing,
+  # no bias -> the EXACT raw radarstate object (byte-identical). The stop-gap only engages inside its regime.
   c = ctrl(v_ego=CREEP_PASSTHROUGH_V - 0.5)
-  r = rs(lead(dRel=3.0, vLead=0.5))
+  r = rs(lead(dRel=STOP_GAP_REGIME_DREL + 8.0, vLead=0.5))
   assert c.smooth_radarstate(r) is r
 
 
 def test_creep_dejitters_churn_but_no_hold():
   # Creep band [CREEP, LOW_SPEED): the churn smoother runs (de-jitter -> smooth stop-and-go), but the
   # flicker-hold does NOT (a dropped/departed lead must not be held, or launch would be delayed).
+  # vLead>STOP_GAP_VLEAD so the stop-gap stays out and this isolates the EMA.
   c = ctrl(v_ego=(CREEP_PASSTHROUGH_V + LOW_SPEED_PASSTHROUGH_V) / 2)
   out = None
-  for f in churn_frames(30, d_a=6.0, d_b=8.0, vLead=1.0):
+  for f in churn_frames(30, d_a=6.0, d_b=8.0, vLead=3.0):
     out = c.smooth_radarstate(rs(f))
   assert 6.0 < out.leadOne.dRel < 8.0                # jitter smoothed
   # a dropout in the creep band is NOT held -> raw passes through (no stale lead)
@@ -92,10 +94,58 @@ def test_creep_dejitters_churn_but_no_hold():
 
 
 def test_creep_clean_lead_passthrough():
-  # creep band, steady single lead (no churn) -> smoother inert -> exact raw object (stop distance unbiased)
+  # creep band, steady moving lead (no churn, outside stop-gap regime) -> exact raw object (unbiased)
   c = ctrl(v_ego=(CREEP_PASSTHROUGH_V + LOW_SPEED_PASSTHROUGH_V) / 2)
-  r = rs(lead(dRel=4.0, vLead=1.5, radarTrackId=3))
+  r = rs(lead(dRel=4.0, vLead=2.5, radarTrackId=3))
   assert c.smooth_radarstate(r) is r
+
+
+# --- stop-gap (settle farther back from a near-stopped lead) ----------------------------------------------
+
+def test_stop_gap_pulls_stopped_lead_closer():
+  c = ctrl(v_ego=2.0)
+  one = lead(dRel=6.0, vLead=0.0, vRel=-1.0)
+  out = c.smooth_radarstate(rs(one))
+  assert out.leadOne.dRel < 6.0                      # reported closer -> MPC stops farther back
+  assert obstacle(out.leadOne) <= obstacle(one) + 1e-6   # brake >= stock (obstacle never farther)
+
+
+def test_stop_gap_monotone_never_farther():
+  c = ctrl(v_ego=3.0)
+  for d in (4.0, 6.0, 9.0, 11.0):
+    out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.0)))
+    assert out.leadOne.dRel <= d + 1e-6
+
+
+def test_stop_gap_min_floor():
+  c = ctrl(v_ego=2.0)
+  out = c.smooth_radarstate(rs(lead(dRel=STOP_GAP_MIN_DREL + 0.5, vLead=0.0)))
+  assert out.leadOne.dRel >= STOP_GAP_MIN_DREL - 1e-6
+
+
+def test_stop_gap_off_when_disabled():
+  c = ctrl(enabled=False, v_ego=2.0)
+  r = rs(lead(dRel=6.0, vLead=0.0))
+  assert c.smooth_radarstate(r) is r                 # disabled -> stock stop distance
+
+
+def test_stop_gap_moving_lead_no_change():
+  c = ctrl(v_ego=2.0)
+  out = c.smooth_radarstate(rs(lead(dRel=6.0, vLead=STOP_GAP_VLEAD + 1.0)))
+  assert out.leadOne.dRel == pytest.approx(6.0)      # lead moving -> not a stop
+
+
+def test_stop_gap_high_speed_no_change():
+  c = ctrl(v_ego=STOP_GAP_VEGO + 2.0)
+  out = c.smooth_radarstate(rs(lead(dRel=6.0, vLead=0.0)))
+  assert out.leadOne.dRel == pytest.approx(6.0)      # above the stop regime -> unbiased
+
+
+def test_stop_gap_far_lead_no_change():
+  c = ctrl(v_ego=2.0)
+  d = STOP_GAP_REGIME_DREL + 5.0
+  out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.0)))
+  assert out.leadOne.dRel == pytest.approx(d)        # beyond the ramp-in regime -> unbiased
 
 
 def test_low_speed_override_lead_passthrough():
