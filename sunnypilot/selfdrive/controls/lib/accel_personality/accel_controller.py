@@ -5,7 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 Acceleration Personality (ECO / NORMAL / SPORT). Tunes only MPC INPUTS, never the output:
-  * positive-accel ceiling + per-cycle open-rate -> tier-scaled take-off from a stop;
+  * positive-accel ceiling + speed-dependent per-cycle open-rate -> tier-scaled take-off from a stop
+    (the open-rate is fast near v=0 so launch is never delayed, tapering to a steady-state rate at speed);
   * add-only, speed-dependent follow-gap widen on the MPC t_follow -> earlier/gentler braking, roomier gap;
   * sticky should_stop hysteresis -> no stop-and-go gas-brake-gas-brake.
 Add-only gap => desired distance >= stock => braking >= stock. Disabled => stock everywhere (byte-stock).
@@ -20,7 +21,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   NORMAL, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, A_CRUISE_MAX_V, STOCK_A_CRUISE_MAX_V, \
-  RISE_RATE, STOCK_RISE_RATE, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, \
+  RISE_RATE_BP, RISE_RATE_V, STOCK_RISE_RATE, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, \
   TF_SLEW_PER_S, TF_DECEL_HOLD_A
 
 
@@ -60,9 +61,12 @@ class AccelController:
     table = A_CRUISE_MAX_V[self._personality] if self._enabled else STOCK_A_CRUISE_MAX_V
     return float(np.interp(v_ego, A_CRUISE_MAX_BP, table))
 
-  def get_rise_rate(self) -> float:
+  def get_rise_rate(self, v_ego: float) -> float:
     # Disabled -> stock ceiling open-rate (off == stock, independent of the NORMAL profile).
-    return RISE_RATE[self._personality] if self._enabled else STOCK_RISE_RATE
+    # Speed-dependent: fast near a stop (non-binding, no launch delay), tapering to the steady-state rate.
+    if not self._enabled:
+      return STOCK_RISE_RATE
+    return float(np.interp(v_ego, RISE_RATE_BP, RISE_RATE_V[self._personality]))
 
   def get_t_follow(self, t_follow: float, v_ego: float) -> float:
     # MPC t_follow hook. Adds a slewed, decel-held, speed-dependent comfort widen on top of the stock

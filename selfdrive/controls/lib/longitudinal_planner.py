@@ -178,7 +178,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # Lower (braking) bound and the ceiling's downward slew stay at the stock rate; only the ceiling's
     # upward slew is tier-dependent (Acceleration Personality).
     accel_clip[0] = np.clip(accel_clip[0], self.prev_accel_clip[0] - 0.05, self.prev_accel_clip[0] + 0.05)
-    accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + self.accel.get_rise_rate())
+    accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + self.accel.get_rise_rate(v_ego))
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
 

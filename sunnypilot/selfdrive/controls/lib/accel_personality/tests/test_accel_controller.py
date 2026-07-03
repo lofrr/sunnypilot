@@ -18,7 +18,7 @@ import pytest
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.accel_controller import AccelController
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
-  ECO, NORMAL, SPORT, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, RISE_RATE, \
+  ECO, NORMAL, SPORT, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, RISE_RATE_V, \
   STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, \
   TF_SLEW_PER_S, TF_DECEL_HOLD_A, AccelerationPersonality
 
@@ -73,7 +73,9 @@ def test_disabled_forces_normal_and_stock_ceiling():
   assert not ctrl.enabled()
   for v in (0.0, 10.0, 25.0, 40.0):
     assert ctrl.get_max_accel(v) == pytest.approx(np.interp(v, A_CRUISE_MAX_BP, STOCK_A_CRUISE_MAX_V))
-  assert ctrl.get_rise_rate() == STOCK_RISE_RATE
+  # off == stock, regardless of v_ego (the speed-dependent open-rate table is bypassed entirely when disabled)
+  for v in (0.0, 5.0, 20.0, 40.0):
+    assert ctrl.get_rise_rate(v) == STOCK_RISE_RATE
 
 
 def test_disabled_t_follow_is_identity():
@@ -103,15 +105,39 @@ def test_ceiling_ordering_eco_le_normal_le_sport():
 
 
 def test_rise_rate_ordering_and_above_stock():
-  assert RISE_RATE[ECO] < RISE_RATE[NORMAL] < RISE_RATE[SPORT]
-  assert RISE_RATE[ECO] > STOCK_RISE_RATE            # every tier opens the ceiling faster than stock (fast take-off)
+  # ordering holds at both knots: near a stop (v=0) and at the steady-state speed (v=5)
+  assert RISE_RATE_V[ECO][0] < RISE_RATE_V[NORMAL][0] < RISE_RATE_V[SPORT][0]
+  assert RISE_RATE_V[ECO][1] < RISE_RATE_V[NORMAL][1] < RISE_RATE_V[SPORT][1]
+  # every tier opens the ceiling faster than stock at both knots (fast take-off, never slower than stock)
+  assert RISE_RATE_V[ECO][0] > STOCK_RISE_RATE
+  assert RISE_RATE_V[ECO][1] > STOCK_RISE_RATE
+
+
+def test_rise_rate_fast_near_stop_tapers_to_steady_state():
+  # Near a stop (v=0) the open-rate must be large/non-binding (NOT the old flat 0.07/0.16/0.24) so launch
+  # is never delayed. At/above the v=5 knot it must match the old flat, telemetry-verified steady-state
+  # values exactly, so cruise/resume behavior at speed is unchanged.
+  for personality, steady_state in ((ECO, 0.07), (NORMAL, 0.16), (SPORT, 0.24)):
+    ctrl = make_controller(personality=personality)
+    assert ctrl.get_rise_rate(0.0) >= 0.5
+    assert ctrl.get_rise_rate(0.0) > steady_state
+    assert ctrl.get_rise_rate(5.0) == pytest.approx(steady_state)
+    assert ctrl.get_rise_rate(20.0) == pytest.approx(steady_state)  # flat above the v=5 knot
 
 
 def test_normal_is_distinct_from_stock():
   nrm = make_controller(personality=NORMAL)
   # enabled NORMAL differs from stock (so NORMAL is a real profile, not a stock alias)
   assert nrm.get_max_accel(25.0) != pytest.approx(np.interp(25.0, A_CRUISE_MAX_BP, STOCK_A_CRUISE_MAX_V))
-  assert nrm.get_rise_rate() != STOCK_RISE_RATE
+  assert nrm.get_rise_rate(0.0) != STOCK_RISE_RATE
+  assert nrm.get_rise_rate(5.0) != STOCK_RISE_RATE
+
+
+def test_eco_ceiling_matches_lowered_table():
+  # ECO's cruise/resume-range ceiling was lowered (launch knot at v=0 unchanged at 1.55).
+  eco = make_controller(personality=ECO)
+  for v, expected in zip(A_CRUISE_MAX_BP, (1.55, 0.75, 0.35, 0.20), strict=True):
+    assert eco.get_max_accel(v) == pytest.approx(expected)
 
 
 # --- t_follow: add-only speed widen -----------------------------------------------------------------------
