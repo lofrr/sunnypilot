@@ -21,8 +21,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   NORMAL, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, A_CRUISE_MAX_V, STOCK_A_CRUISE_MAX_V, \
-  RISE_RATE_BP, RISE_RATE_V, STOCK_RISE_RATE, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, \
-  TF_SLEW_PER_S, TF_DECEL_HOLD_A
+  RISE_RATE_BP, RISE_RATE_V, STOCK_RISE_RATE, JERK_SCALE_BP, JERK_SCALE_V, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, \
+  TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A
 
 
 class AccelController:
@@ -67,6 +67,13 @@ class AccelController:
     if not self._enabled:
       return STOCK_RISE_RATE
     return float(np.interp(v_ego, RISE_RATE_BP, RISE_RATE_V[self._personality]))
+
+  def get_jerk_scale(self, v_ego: float) -> float:
+    # Disabled -> 1.0 -> byte-stock jerk cost. Enabled: relaxes the core MPC's jerk_factor near a stop
+    # (tier-scaled), ramping back to 1.0 (stock) by the v=5 knot so cruise/follow jerk is unchanged.
+    if not self._enabled:
+      return 1.0
+    return float(np.interp(v_ego, JERK_SCALE_BP, JERK_SCALE_V[self._personality]))
 
   def get_t_follow(self, t_follow: float, v_ego: float) -> float:
     # MPC t_follow hook. Adds a slewed, decel-held, speed-dependent comfort widen on top of the stock

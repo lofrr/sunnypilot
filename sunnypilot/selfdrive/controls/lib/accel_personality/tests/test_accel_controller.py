@@ -19,8 +19,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.accel_controller import AccelController
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   ECO, NORMAL, SPORT, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, RISE_RATE_V, \
-  STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, \
-  TF_SLEW_PER_S, TF_DECEL_HOLD_A, AccelerationPersonality
+  STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, JERK_SCALE_BP, JERK_SCALE_V, TF_WIDEN_V_BP, TF_WIDEN_BASE_V, \
+  TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A, AccelerationPersonality
 
 _EPS = 1e-6
 _TF_STOCK = 1.45          # a representative stock t_follow (standard personality); the widen is add-only on top
@@ -138,6 +138,44 @@ def test_eco_ceiling_matches_lowered_table():
   eco = make_controller(personality=ECO)
   for v, expected in zip(A_CRUISE_MAX_BP, (1.55, 0.75, 0.35, 0.20), strict=True):
     assert eco.get_max_accel(v) == pytest.approx(expected)
+
+
+# --- jerk-scale: launch jerk-cost relaxation (MPC input, feeds long_mpc.set_weights) ----------------------
+
+def test_jerk_scale_disabled_is_stock():
+  ctrl = make_controller(enabled=False, personality=SPORT)
+  for v in (0.0, 2.5, 5.0, 20.0):
+    assert ctrl.get_jerk_scale(v) == pytest.approx(1.0)
+
+
+def test_jerk_scale_relaxed_near_stop_flat_at_speed():
+  for personality, relaxed in ((ECO, 0.60), (NORMAL, 0.45), (SPORT, 0.30)):
+    ctrl = make_controller(personality=personality)
+    assert ctrl.get_jerk_scale(0.0) == pytest.approx(relaxed)
+    assert ctrl.get_jerk_scale(5.0) == pytest.approx(1.0)      # back to stock by the v=5 knot
+    assert ctrl.get_jerk_scale(20.0) == pytest.approx(1.0)     # flat above the knot
+
+
+def test_jerk_scale_never_exceeds_stock():
+  # relaxation only ever LOWERS the jerk cost (more responsive), never raises it above 1.0 (stock)
+  for personality in (ECO, NORMAL, SPORT):
+    ctrl = make_controller(personality=personality)
+    for v in np.linspace(0.0, 40.0, 20):
+      assert ctrl.get_jerk_scale(float(v)) <= 1.0 + _EPS
+
+
+def test_jerk_scale_tier_ordering_at_stop():
+  eco = make_controller(personality=ECO).get_jerk_scale(0.0)
+  nrm = make_controller(personality=NORMAL).get_jerk_scale(0.0)
+  spt = make_controller(personality=SPORT).get_jerk_scale(0.0)
+  assert spt < nrm < eco    # SPORT relaxes the most (most responsive launch), ECO the least
+
+
+def test_jerk_scale_table_matches_constants():
+  for personality in (ECO, NORMAL, SPORT):
+    ctrl = make_controller(personality=personality)
+    for v in (0.0, 2.0, 5.0, 15.0):
+      assert ctrl.get_jerk_scale(v) == pytest.approx(np.interp(v, JERK_SCALE_BP, JERK_SCALE_V[personality]))
 
 
 # --- t_follow: add-only speed widen -----------------------------------------------------------------------

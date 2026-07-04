@@ -45,6 +45,19 @@ RISE_RATE_V = {
   SPORT:  [1.20, 0.24],
 }
 
+# --- Launch jerk-cost relaxation (MPC INPUT: scales the core MPC's own jerk_factor) -----------------------
+# The ceiling open-rate above stops binding once the ceiling is already open (the normal case while
+# following a lead), so it can't pace the launch ramp. That ramp is paced by A_CHANGE_COST/J_EGO_COST via
+# upstream get_jerk_factor(personality) -- stock 1.0 for relaxed/standard, 0.5 for aggressive. JERK_SCALE
+# multiplies into that same upstream factor (same lever stock's aggressive tier already uses), bounded to
+# near a stop and ramped back to 1.0 (stock) by cruise speed.
+JERK_SCALE_BP = [0., 5.]                           # m/s
+JERK_SCALE_V = {
+  ECO:    [0.60, 1.0],
+  NORMAL: [0.45, 1.0],
+  SPORT:  [0.30, 1.0],
+}
+
 # --- Follow-gap widen (add-only, fed to the MPC t_follow) ------------------------------------------------
 # Add a small speed-dependent widen to the stock t_follow (the driver's gap-button value). Wider gap ->
 # MPC brakes earlier + gentler onto a slowing lead and settles a roomier cruise gap. Invariants:
