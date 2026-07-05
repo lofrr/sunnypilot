@@ -17,7 +17,7 @@ import pytest
 from openpilot.sunnypilot.selfdrive.controls.lib.radar_distance.radar_distance import \
   RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, LOW_SPEED_PASSTHROUGH_V, CREEP_PASSTHROUGH_V, \
   DROPOUT_DREL, STOP_GAP_MIN_DREL, STOP_GAP_VEGO, STOP_GAP_VLEAD, STOP_GAP_REGIME_DREL, SWITCH_DREL, \
-  JUMP_GUARD_MAX_HOLD
+  JUMP_GUARD_MAX_HOLD, STOP_GAP_CREEP_V, STOP_GAP_CREEP_HOLD_FRAMES
 
 COMFORT_BRAKE = 2.5
 
@@ -147,6 +147,61 @@ def test_stop_gap_far_lead_no_change():
   d = STOP_GAP_REGIME_DREL + 5.0
   out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.0)))
   assert out.leadOne.dRel == pytest.approx(d)        # beyond the ramp-in regime -> unbiased
+
+
+# --- stop-gap creep override (sustained lead motion releases the bias even below STOP_GAP_VLEAD) ----------
+
+def test_stop_gap_creep_releases_after_sustained_motion():
+  # route 550a71ee4c7a7fbe/000004a4--c9c4691959, t~1126-1138: a lead crept forward at 0.3-0.6 m/s (well under
+  # STOP_GAP_VLEAD) for 9+ seconds; without the override the bias suppressed the whole real gap growth the
+  # entire time, producing a 9+ second launch delay. Real dRel grows steadily 4.0 -> 4.5m over this window.
+  c = ctrl(v_ego=0.0)
+  d = 4.0
+  out = None
+  for i in range(STOP_GAP_CREEP_HOLD_FRAMES + 5):
+    d += 0.05
+    out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.4)))
+    if i < STOP_GAP_CREEP_HOLD_FRAMES - 1:
+      assert out.leadOne.dRel < d - 1e-6                # still suppressed while creep hasn't sustained yet
+  assert out.leadOne.dRel == pytest.approx(d)            # released after STOP_GAP_CREEP_HOLD_FRAMES of motion
+
+
+def test_stop_gap_creep_release_is_sticky_through_a_momentary_zero_blip():
+  # A single-frame return to exactly 0.0 (real sensor behavior mid-creep, not just noise) must not re-arm the
+  # bias once sustained creep has already released it -- this was the actual bug: the real route's lead
+  # dipped to vLead=0.00 for one frame mid-launch and the bias briefly re-suppressed the gap right as a result.
+  c = ctrl(v_ego=0.0)
+  d = 4.0
+  for _ in range(STOP_GAP_CREEP_HOLD_FRAMES):
+    d += 0.05
+    c.smooth_radarstate(rs(lead(dRel=d, vLead=0.4)))
+  d += 0.05
+  out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.0)))  # exact-zero blip
+  assert out.leadOne.dRel == pytest.approx(d)             # still released, not re-suppressed
+  d += 0.05
+  out = c.smooth_radarstate(rs(lead(dRel=d, vLead=0.3)))  # creep resumes
+  assert out.leadOne.dRel == pytest.approx(d)
+
+
+def test_stop_gap_creep_counter_resets_on_a_genuine_new_stop():
+  # Leaving the bias regime entirely (lead departs, or ego speeds past STOP_GAP_VEGO) must re-arm the
+  # override so a LATER, unrelated near-stop encounter isn't permanently exempted by a stale latch.
+  c = ctrl(v_ego=0.0)
+  d = 4.0
+  for _ in range(STOP_GAP_CREEP_HOLD_FRAMES):
+    d += 0.05
+    c.smooth_radarstate(rs(lead(dRel=d, vLead=0.4)))
+  c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0)))   # lead lost -> regime exit
+  out = c.smooth_radarstate(rs(lead(dRel=6.0, vLead=0.0)))               # fresh near-stop encounter
+  assert out.leadOne.dRel < 6.0                                          # bias re-armed, active again
+
+
+def test_stop_gap_creep_below_threshold_never_releases():
+  c = ctrl(v_ego=0.0)
+  out = None
+  for _ in range(STOP_GAP_CREEP_HOLD_FRAMES + 10):
+    out = c.smooth_radarstate(rs(lead(dRel=6.0, vLead=STOP_GAP_CREEP_V * 0.5)))
+  assert out.leadOne.dRel < 6.0 - 1e-6                # vLead never exceeds the creep threshold -> stays biased
 
 
 def test_low_speed_override_lead_passthrough():

@@ -18,6 +18,8 @@ reports a farther-or-faster lead than reality, so braking is always >= stock. Fo
     vLead/vRel stay symmetric (secondary terms, no demonstrated need to bias them);
   * stop-gap: near a (near-)stopped lead at low speed report dRel a touch closer so the MPC's own smooth stop
     settles farther back (the Prius TSS2 stock crawl creeps in to ~1.5 m). Monotone (closer => brake >= stock).
+    Overridden off by sustained lead motion (even slow creep) so it can't suppress a real, growing gap during
+    a launch;
 Also publishes a read-only lead-instability flag (telemetry). Disabled => byte-stock passthrough always.
 """
 
@@ -66,6 +68,16 @@ STOP_GAP_VLEAD = 1.5           # m/s: only behind a (near-)stopped lead; ramps o
 STOP_GAP_REGIME_DREL = 12.0    # m: bias ramps in below this dRel
 STOP_GAP_RAMP_BAND = 2.0       # m: ramp-in band (full offset below REGIME_DREL - RAMP_BAND)
 STOP_GAP_MIN_DREL = 2.0        # m: never report a lead closer than this
+
+# Stop-gap creep override: a lead creeping forward slowly (e.g. inching in stop-and-go) can sit under
+# STOP_GAP_VLEAD for many seconds without ever crossing it, so v_ramp stays high and the bias keeps
+# suppressing a real, growing gap the whole time -- observed on real telemetry as a 9+ second launch delay
+# (the bias reported the lead ~1.8m closer than reality for the entire creep, so the MPC saw almost no gap
+# growth to react to). Any sustained motion this long overrides the bias off regardless of how slow that
+# motion is -- sustained creep means launching, not settling into a stop.
+STOP_GAP_CREEP_V = 0.03        # m/s: a truly-stopped lead reads exactly 0.0; treat anything above this as motion
+STOP_GAP_CREEP_HOLD_S = 1.5    # s: this much sustained motion overrides the bias off
+STOP_GAP_CREEP_HOLD_FRAMES = int(STOP_GAP_CREEP_HOLD_S / DT_MDL)
 
 
 class _BiasedLead:
@@ -266,6 +278,8 @@ class RadarDistanceController:
     self._two = _LeadHold()
     self._stability = _LeadStability()
     self._smoother = _LeadSmoother()
+    self._creep_frames = 0
+    self._creep_released = False
 
   def _read_params(self) -> None:
     enabled = self._params.get_bool("RadarDistance")
@@ -274,6 +288,8 @@ class RadarDistanceController:
       self._one.reset()
       self._two.reset()
       self._smoother.reset()
+      self._creep_frames = 0
+      self._creep_released = False
     self._enabled = enabled
 
   def update(self, sm) -> None:
@@ -291,8 +307,20 @@ class RadarDistanceController:
   def _stop_gap_bias(self, lead):
     # Report a (near-)stopped lead up to STOP_GAP_M closer at low speed so the MPC's own smooth stop ends
     # that much farther back. Monotone (only ever reports closer). No-op outside the regime.
-    if not lead.status or lead.vLead > STOP_GAP_VLEAD or self._v_ego > STOP_GAP_VEGO or lead.dRel <= STOP_GAP_MIN_DREL:
+    in_regime = (lead.status and lead.vLead <= STOP_GAP_VLEAD and self._v_ego <= STOP_GAP_VEGO and
+                 lead.dRel > STOP_GAP_MIN_DREL)
+    if not in_regime:
+      self._creep_frames = 0
+      self._creep_released = False
       return lead
+
+    if lead.vLead > STOP_GAP_CREEP_V:
+      self._creep_frames = min(self._creep_frames + 1, STOP_GAP_CREEP_HOLD_FRAMES)
+      if self._creep_frames >= STOP_GAP_CREEP_HOLD_FRAMES:
+        self._creep_released = True                          # latched: a single-frame near-zero blip afterward
+    if self._creep_released:                                 # (e.g. sensor noise mid-creep) can't re-suppress it
+      return lead
+
     d_ramp = min(max((STOP_GAP_REGIME_DREL - lead.dRel) / STOP_GAP_RAMP_BAND, 0.0), 1.0)
     v_ramp = min(max((STOP_GAP_VLEAD - lead.vLead) / STOP_GAP_VLEAD, 0.0), 1.0)
     offset = STOP_GAP_M * d_ramp * v_ramp
