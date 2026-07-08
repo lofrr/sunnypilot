@@ -11,7 +11,12 @@ Acceleration Personality (ECO / NORMAL / SPORT). Tunes only MPC INPUTS, never th
     any fresh accel<->decel direction change, when the tracked lead is itself braking hard, or when the gap
     is closing fast for any other reason (cut-in, ego overtaking a slower lead) -- the last one is the only
     proactive trigger keyed on an MPC INPUT (vRel) rather than a_ego's own realized sign flip, so it can
-    soften the very first brake jab instead of only the recovery after it;
+    soften the very first brake jab instead of only the recovery after it. The lead-keyed factors are
+    TRANSIENT (dip on a fresh/escalating trigger, then ease back to 1.0 over a fixed window regardless of
+    whether the raw trigger is still active) rather than a level-level pin -- a sustained low jerk_scale
+    destabilizes the MPC's real-time-iteration re-solve into an oscillation (closed-loop-verified: a pinned
+    0.6 factor produced a 30+ m/s^3 jerk whipsaw where stock stayed at 0), so only the onset gets softened,
+    matching the "first jab" intent, never the sustained middle of a real braking episode;
   * add-only, speed-dependent follow-gap widen on the MPC t_follow -> earlier/gentler braking, roomier gap;
   * sticky should_stop hysteresis -> no stop-and-go gas-brake-gas-brake.
 Add-only gap => desired distance >= stock => braking >= stock. Disabled => stock everywhere (byte-stock).
@@ -27,8 +32,8 @@ from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   NORMAL, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, A_CRUISE_MAX_V, STOCK_A_CRUISE_MAX_V, \
   RISE_RATE_BP, RISE_RATE_V, STOCK_RISE_RATE, JERK_SCALE_BP, JERK_SCALE_V, ONSET_DEADBAND, ONSET_RAMP_S, \
-  ONSET_FLOOR, LEAD_BRAKE_ALEAD_BP, LEAD_BRAKE_FACTOR_V, CLOSING_VREL_BP, CLOSING_FACTOR_V, TF_WIDEN_V_BP, \
-  TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A
+  ONSET_FLOOR, RELAX_RAMP_S, LEAD_BRAKE_ALEAD_BP, LEAD_BRAKE_FACTOR_V, CLOSING_VREL_BP, CLOSING_FACTOR_V, \
+  TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A
 
 
 class _OnsetRelax:
@@ -58,6 +63,39 @@ class _OnsetRelax:
     return self._ramp
 
 
+class _TransientRelax:
+  # Same shape as _OnsetRelax's ramp, but triggered by a level (a raw tier-scaled factor computed fresh each
+  # cycle) instead of a sign flip: on a fresh dip (factor newly below 1.0) or a further escalation (factor
+  # drops below the lowest value already seen this episode), snap down to it; otherwise ease back toward 1.0
+  # over RELAX_RAMP_S REGARDLESS of whether the raw factor is still low. Without this, a raw factor that
+  # stays pinned at its floor for the duration of a real, sustained closing/braking episode (not just the
+  # first instant) keeps jerk_scale low for seconds at a time -- closed-loop-verified to destabilize the
+  # MPC's real-time-iteration re-solve into an oscillation (30+ m/s^3 jerk vs 0 for the identical scenario
+  # with the factor disabled). Ramping back after the initial dip keeps the "soften the first jab" intent
+  # without holding a low jerk cost through the sustained middle of a real episode.
+  def __init__(self):
+    self._was_active = False
+    self._episode_floor = 1.0
+    self._ramp = 1.0
+
+  def reset(self) -> None:
+    self._was_active = False
+    self._episode_floor = 1.0
+    self._ramp = 1.0
+
+  def update(self, raw_factor: float, ramp_s: float) -> float:
+    active = raw_factor < 1.0 - 1e-3
+    if active and (not self._was_active or raw_factor < self._episode_floor):
+      self._episode_floor = raw_factor
+      self._ramp = raw_factor
+    else:
+      self._ramp = min(1.0, self._ramp + DT_MDL / ramp_s)
+      if not active:
+        self._episode_floor = 1.0
+    self._was_active = active
+    return self._ramp
+
+
 class AccelController:
   def __init__(self, CP: structs.CarParams, mpc=None, params=None):
     # CP/mpc accepted for the planner's constructor signature; unused (shapes MPC inputs only).
@@ -70,6 +108,8 @@ class AccelController:
     self._widen = 0.0                     # current slewed follow-gap widen (s), add-only
     self._t_follow = 0.0                  # last t_follow handed to the MPC (telemetry)
     self._onset_relax = _OnsetRelax()
+    self._lead_brake_relax = _TransientRelax()
+    self._closing_relax = _TransientRelax()
     self._onset_factor = 1.0
     self._lead_brake_factor = 1.0
     self._closing_factor = 1.0
@@ -91,10 +131,12 @@ class AccelController:
     if self._enabled:
       lead = sm['radarState'].leadOne
       self._onset_factor = self._onset_relax.update(self._a_ego, ONSET_FLOOR[self._personality])
-      self._lead_brake_factor = self._get_lead_brake_factor(lead)
-      self._closing_factor = self._get_closing_factor(lead)
+      self._lead_brake_factor = self._lead_brake_relax.update(self._get_lead_brake_factor(lead), RELAX_RAMP_S)
+      self._closing_factor = self._closing_relax.update(self._get_closing_factor(lead), RELAX_RAMP_S)
     else:
       self._onset_relax.reset()
+      self._lead_brake_relax.reset()
+      self._closing_relax.reset()
       self._onset_factor = 1.0
       self._lead_brake_factor = 1.0
       self._closing_factor = 1.0
@@ -102,11 +144,15 @@ class AccelController:
     self._frame += 1
 
   def _get_lead_brake_factor(self, lead) -> float:
+    # Raw, uneased tier-scaled factor for THIS cycle -- fed through _TransientRelax in update(), never used
+    # directly as the published factor (see the class docstring for why: a level-pinned floor destabilizes
+    # the MPC's re-solve over a sustained episode).
     if not lead.status:
       return 1.0
     return float(np.interp(lead.aLeadK, LEAD_BRAKE_ALEAD_BP, LEAD_BRAKE_FACTOR_V[self._personality]))
 
   def _get_closing_factor(self, lead) -> float:
+    # Raw, uneased tier-scaled factor for THIS cycle -- see _get_lead_brake_factor's note.
     if not lead.status:
       return 1.0
     return float(np.interp(lead.vRel, CLOSING_VREL_BP, CLOSING_FACTOR_V[self._personality]))
@@ -115,6 +161,8 @@ class AccelController:
     # Drop the accumulated widen (e.g. on disengage / standstill re-init) so it re-ramps cleanly.
     self._widen = 0.0
     self._onset_relax.reset()
+    self._lead_brake_relax.reset()
+    self._closing_relax.reset()
     self._onset_factor = 1.0
     self._lead_brake_factor = 1.0
     self._closing_factor = 1.0

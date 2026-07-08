@@ -15,7 +15,17 @@ class Plant:
   messaging_initialized = False
 
   def __init__(self, lead_relevancy=False, speed=0.0, distance_lead=2.0,
-               enabled=True, only_lead2=False, only_radar=False, e2e=False, personality=0, force_decel=False):
+               enabled=True, only_lead2=False, only_radar=False, e2e=False, personality=0, force_decel=False,
+               lead_dRel_glitch_fn=None, e2e_accel_fn=None):
+    # lead_dRel_glitch_fn(current_time, d_rel, v_rel) -> (d_rel, v_rel): optional per-step override of the
+    # REPORTED radar lead dRel/vRel, independent of the true physics used to advance distance_lead/speed --
+    # models a sensor/fusion glitch (what radard actually reports can diverge from the real world) without
+    # corrupting the closed-loop ego dynamics the rest of the planner reacts to. None -> no override (default).
+    # e2e_accel_fn(current_time, ego_speed, ego_accel) -> float: optional override of the e2e model's
+    # action.desiredAcceleration (default is a mild self.acceleration+0.1 echo, which can't independently
+    # disagree with the MPC enough to exercise is_e2e()-gated behavior). None -> default echo (unchanged).
+    self.lead_dRel_glitch_fn = lead_dRel_glitch_fn
+    self.e2e_accel_fn = e2e_accel_fn
     self.rate = 1. / DT_MDL
 
     if not Plant.messaging_initialized:
@@ -90,6 +100,9 @@ class Plant:
       prob_lead = 0.0
       status = False
 
+    if self.lead_dRel_glitch_fn is not None and self.lead_relevancy:
+      d_rel, v_rel = self.lead_dRel_glitch_fn(self.current_time, d_rel, v_rel)
+
     lead = log.RadarState.LeadData.new_message()
     lead.dRel = float(d_rel)
     lead.yRel = 0.0
@@ -112,7 +125,10 @@ class Plant:
     position = log.XYZTData.new_message()
     position.x = [float(x) for x in (self.speed + 0.5) * np.array(ModelConstants.T_IDXS)]
     model.modelV2.position = position
-    model.modelV2.action.desiredAcceleration = float(self.acceleration + 0.1)
+    if self.e2e_accel_fn is not None:
+      model.modelV2.action.desiredAcceleration = float(self.e2e_accel_fn(self.current_time, self.speed, self.acceleration))
+    else:
+      model.modelV2.action.desiredAcceleration = float(self.acceleration + 0.1)
     velocity = log.XYZTData.new_message()
     velocity.x = [float(x) for x in (self.speed + 0.5) * np.ones_like(ModelConstants.T_IDXS)]
     velocity.x[0] = float(self.speed) # always start at current speed

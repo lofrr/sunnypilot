@@ -20,8 +20,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.accel_control
 from openpilot.sunnypilot.selfdrive.controls.lib.accel_personality.constants import \
   ECO, NORMAL, SPORT, PERSONALITY_MIN, PERSONALITY_MAX, A_CRUISE_MAX_BP, RISE_RATE_V, \
   STOCK_A_CRUISE_MAX_V, STOCK_RISE_RATE, JERK_SCALE_BP, JERK_SCALE_V, ONSET_DEADBAND, ONSET_RAMP_S, \
-  ONSET_FLOOR, LEAD_BRAKE_ALEAD_BP, LEAD_BRAKE_FACTOR_V, CLOSING_VREL_BP, CLOSING_FACTOR_V, TF_WIDEN_V_BP, \
-  TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A, AccelerationPersonality
+  ONSET_FLOOR, RELAX_RAMP_S, LEAD_BRAKE_ALEAD_BP, LEAD_BRAKE_FACTOR_V, CLOSING_VREL_BP, CLOSING_FACTOR_V, \
+  TF_WIDEN_V_BP, TF_WIDEN_BASE_V, TF_WIDEN_TIER, TF_WIDEN_MAX, TF_SLEW_PER_S, TF_DECEL_HOLD_A, AccelerationPersonality
 
 _EPS = 1e-6
 _TF_STOCK = 1.45          # a representative stock t_follow (standard personality); the widen is add-only on top
@@ -335,6 +335,51 @@ def test_closing_fires_before_a_ego_moves():
   ctrl = make_controller(personality=NORMAL)
   ctrl.update(make_sm(v_ego=20.0, a_ego=0.0, lead=make_lead(status=True, vRel=-6.0)))
   assert ctrl.get_jerk_scale(20.0) == pytest.approx(CLOSING_FACTOR_V[NORMAL][0])
+
+
+# --- transient relax: closing/lead-brake factors dip then ease back, never hold a sustained low floor ------
+# Closed-loop-verified (selfdrive/test/longitudinal_maneuvers-based): holding jerk_scale at a fixed low value
+# for the duration of a sustained closing/braking episode destabilizes the MPC's real-time-iteration re-solve
+# into an oscillation (30+ m/s^3 jerk vs 0 with the factor disabled, for an identical scenario). These pin
+# the fix -- a sustained, UNCHANGING severe closing rate must ease back toward stock, not stay pinned.
+
+def test_closing_factor_eases_back_despite_sustained_severe_vrel():
+  ctrl = make_controller(personality=SPORT)
+  ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, vRel=-6.0)))
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(CLOSING_FACTOR_V[SPORT][0])
+  for _ in range(int(RELAX_RAMP_S / DT_MDL)):
+    ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, vRel=-6.0)))   # same severity, every cycle
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(1.0, abs=1e-3)             # eased back despite no improvement
+
+
+def test_lead_brake_factor_eases_back_despite_sustained_hard_braking_lead():
+  ctrl = make_controller(personality=SPORT)
+  ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, aLeadK=-3.0)))
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(LEAD_BRAKE_FACTOR_V[SPORT][0])
+  for _ in range(int(RELAX_RAMP_S / DT_MDL)):
+    ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, aLeadK=-3.0)))
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_closing_factor_resnaps_on_escalation_not_just_first_onset():
+  # A worsening (not just sustained) closing rate must not be ignored because we're mid-ramp-back --
+  # re-snap to the newly-lower floor.
+  ctrl = make_controller(personality=SPORT)
+  ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, vRel=-2.0)))     # mild, partial relax
+  partial = ctrl.get_jerk_scale(20.0)
+  assert 1.0 - _EPS > partial > CLOSING_FACTOR_V[SPORT][0] + _EPS
+  ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, vRel=-6.0)))     # escalates to the full floor
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(CLOSING_FACTOR_V[SPORT][0])
+
+
+def test_closing_factor_reset_clears_transient_state():
+  ctrl = make_controller(personality=SPORT)
+  for _ in range(5):
+    ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=True, vRel=-6.0)))
+  assert ctrl.get_jerk_scale(20.0) < 1.0 - _EPS
+  ctrl.reset()
+  ctrl.update(make_sm(v_ego=20.0, lead=make_lead(status=False)))
+  assert ctrl.get_jerk_scale(20.0) == pytest.approx(1.0)
 
 
 # --- combined: get_jerk_scale takes the most-relaxed of all three factors ----------------------------------

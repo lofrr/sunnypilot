@@ -74,6 +74,16 @@ ONSET_DEADBAND = 0.15          # m/s^2: ignore aEgo noise this small around a ze
 ONSET_RAMP_S = 0.4             # s: ease back to stock over this long
 ONSET_FLOOR = {ECO: 0.75, NORMAL: 0.65, SPORT: 0.50}
 
+# --- Transient-relax ramp for the two LEVEL-triggered factors below (lead-braking, closing-rate) -----------
+# Both factors are eased through _TransientRelax (accel_controller.py), not applied as a level-pinned floor:
+# closed-loop-verified (selfdrive/test/longitudinal_maneuvers/plant.py-based) that holding jerk_scale at a
+# fixed low value for the duration of a sustained closing/braking episode -- not just its first instant --
+# destabilizes the MPC's real-time-iteration re-solve into an oscillation (30+ m/s^3 jerk vs 0 with the
+# factor disabled, for an identical scenario). Same ramp duration as ONSET_RAMP_S -- same "soften the first
+# jab, then get out of the way" shape -- kept as its own constant since the two mechanisms are conceptually
+# distinct (direction-change vs a proactive level) and may need to diverge under future tuning.
+RELAX_RAMP_S = 0.4             # s: ease back to stock over this long, regardless of whether the raw factor is still low
+
 # --- Lead-braking jerk-cost relaxation (MPC INPUT: react faster to a hard-braking lead) --------------------
 # When the tracked lead is itself decelerating hard, relax jerk cost so the MPC's reaction isn't paced by a
 # jerk budget tuned for routine following. No lead, or lead not braking -> 1.0. Disabled -> 1.0.
