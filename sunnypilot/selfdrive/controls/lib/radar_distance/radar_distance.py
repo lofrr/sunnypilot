@@ -24,7 +24,7 @@ reports a farther-or-faster lead than reality, so braking is always >= stock. Fo
   * stop-gap: near a (near-)stopped lead at low speed report dRel a touch closer so the MPC's own smooth stop
     settles farther back (the Prius TSS2 stock crawl creeps in to ~1.5 m). Monotone (closer => brake >= stock).
     Overridden off by sustained lead motion (even slow creep) so it can't suppress a real, growing gap during
-    a launch;
+    a launch. Never runs on a held (jump-guard or flicker-hold) lead, since a hold's vLead/dRel are stale;
 Also publishes a read-only lead-instability flag (telemetry). Disabled => byte-stock passthrough always.
 """
 
@@ -45,13 +45,6 @@ LOW_SPEED_PASSTHROUGH_V = 5.0   # m/s: below this, no flicker-hold (holding a st
 CREEP_PASSTHROUGH_V = 1.0       # m/s: below this, full byte-stock passthrough (protect the stock stop distance)
 
 SWITCH_DREL = 4.0               # m, dRel jump = a track switch (used by the instability detector + jump-guard).
-# Route 550a71ee4c7a7fbe/000004b4, t~976.1s: a real fusion-glitch bounce (17.7<->12.3m across ~3 radar
-# cycles, ~0.3s) sailed through both mechanisms at the old 8.0 threshold -- physically impossible for one
-# real object at the vRel logged alongside it (~1-2 m/s closing would take seconds to cover 5m, not 0.1s).
-# Telemetry (all 4 routes in that session, ~230-280k dRel-diff samples/route) shows a clean separation: the
-# 99.5th-percentile ORDINARY frame-to-frame jitter is under ~2m on 3 of 4 routes (the 4th runs hotter due to
-# genuinely more real target changes, not noise -- see radar_distance tests/telemetry notes), while glitch
-# jumps cluster well above 4m. 4.0 sits with margin on both sides of that gap.
 
 # Jump-guard: a same-cycle dRel jump this far FARTHER, on a lead that never dropped status, is treated as a
 # fusion transient (not a real sudden separation) and held at the last-trusted value for a bounded number of
@@ -81,18 +74,10 @@ STOP_GAP_REGIME_DREL = 12.0    # m: bias ramps in below this dRel
 STOP_GAP_RAMP_BAND = 2.0       # m: ramp-in band (full offset below REGIME_DREL - RAMP_BAND)
 STOP_GAP_MIN_DREL = 2.0        # m: never report a lead closer than this
 
-# Stop-gap creep override: a lead creeping forward slowly (e.g. inching in stop-and-go) can sit under
-# STOP_GAP_VLEAD for many seconds without ever crossing it, so v_ramp stays high and the bias keeps
-# suppressing a real, growing gap the whole time -- observed on real telemetry as a 9+ second launch delay
-# (the bias reported the lead ~1.8m closer than reality for the entire creep, so the MPC saw almost no gap
-# growth to react to). Any sustained motion this long overrides the bias off regardless of how slow that
-# motion is -- sustained creep means launching, not settling into a stop. The frame counter decays (not just
-# holds) on a sub-threshold frame, so it takes SUSTAINED motion, not merely cumulative noise straddling the
-# threshold, to reach the cap -- route 550a71ee4c7a7fbe/000004b6, t~678-690s: a genuinely-stopped lead's vLead
-# noise (small blips above 0.03 m/s with no real motion) still crossed the threshold often enough to
-# eventually hit the old monotonic-only counter's cap, latching the bias permanently off mid-stop. That
-# produced a same-cycle ~2m+ jump in the reported gap (the MPC saw "more room" appear out of nowhere) right
-# as the car was holding a stop -- one clear trigger for the observed launch-then-brake-back cycling.
+# Stop-gap creep override: a lead creeping forward slowly can sit under STOP_GAP_VLEAD for many seconds
+# without crossing it, so the bias keeps suppressing a real, growing gap. Sustained motion this long overrides
+# the bias off regardless of how slow. The counter decays (not just holds) on a sub-threshold frame, so it
+# takes sustained motion, not noise straddling the threshold, to reach the cap.
 STOP_GAP_CREEP_V = 0.03        # m/s: a truly-stopped lead reads exactly 0.0; treat anything above this as motion
 STOP_GAP_CREEP_HOLD_S = 1.5    # s: this much sustained motion overrides the bias off
 STOP_GAP_CREEP_HOLD_FRAMES = int(STOP_GAP_CREEP_HOLD_S / DT_MDL)
@@ -172,6 +157,11 @@ class _LeadSmoother:
     self._hold = 0
 
   def update(self, lead, noisy: bool):
+    # A held lead's dRel/vLead is a stale extrapolation -- feeding it into the EMA would both hide that from
+    # downstream (wraps it into a _SmoothedLead) and pollute _d/_vl/_vr, lagging the real value's recovery.
+    if isinstance(lead, _HeldLead):
+      self.reset()
+      return lead
     self._hold = LEAD_SMOOTH_HOLD if noisy else self._hold - 1
     if self._hold <= 0 or not lead.status:
       self.reset()
@@ -192,6 +182,8 @@ class _JumpGuard:
   # the match locks on) by holding the last-trusted reading, extrapolated by its own vRel, for a bounded
   # number of frames. A CLOSER jump of any size always passes through immediately -- this can only ever delay
   # relief, never a brake -- and it self-heals after JUMP_GUARD_MAX_HOLD frames if the jump was real.
+  # modelProb is capped at FCW_PROB_CAP on the held lead (same as _LeadHold's flicker-hold, below) -- a held
+  # reading is no longer confirmed fresh, so it must not carry enough confidence to trip the stock FCW gate.
   def __init__(self):
     self._last = None
     self._hold = 0
@@ -210,7 +202,7 @@ class _JumpGuard:
       self._hold += 1
       held_dRel = max(MIN_HELD_DREL, dRel0 - max(-vRel0, 0.0) * DT_MDL)
       self._last = (held_dRel, vRel0, vLead0, aLeadK0, aLeadTau0, prob0)
-      return _HeldLead(held_dRel, vRel0, vLead0, aLeadK0, aLeadTau0, prob0)
+      return _HeldLead(held_dRel, vRel0, vLead0, aLeadK0, aLeadTau0, min(prob0, FCW_PROB_CAP))
 
     self._hold = 0
     self._last = (raw.dRel, raw.vRel, raw.vLead, raw.aLeadK, raw.aLeadTau, raw.modelProb)
@@ -339,11 +331,17 @@ class RadarDistanceController:
   def _stop_gap_bias(self, lead):
     # Report a (near-)stopped lead up to STOP_GAP_M closer at low speed so the MPC's own smooth stop ends
     # that much farther back. Monotone (only ever reports closer). No-op outside the regime.
-    in_regime = (lead.status and lead.vLead <= STOP_GAP_VLEAD and self._v_ego <= STOP_GAP_VEGO and
-                 lead.dRel > STOP_GAP_MIN_DREL)
+    in_regime = (lead.status and lead.vLead <= STOP_GAP_VLEAD and
+                 self._v_ego <= STOP_GAP_VEGO and lead.dRel > STOP_GAP_MIN_DREL)
     if not in_regime:
       self._creep_frames = 0
       self._creep_released = False
+      return lead
+
+    # A held (stale) lead's near-zero vLead can still satisfy the regime check on a lead that's departed --
+    # skip biasing it, but freeze the creep latch rather than resetting it (an unrelated jump-guard glitch
+    # shouldn't undo motion the lead already earned).
+    if isinstance(lead, _HeldLead):
       return lead
 
     if lead.vLead > STOP_GAP_CREEP_V:

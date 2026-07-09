@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.radar_distance.radar_distance import \
   RadarDistanceController, HOLD_MAX_FRAMES, FCW_PROB_CAP, LOW_SPEED_PASSTHROUGH_V, CREEP_PASSTHROUGH_V, \
   DROPOUT_DREL, STOP_GAP_MIN_DREL, STOP_GAP_VEGO, STOP_GAP_VLEAD, STOP_GAP_REGIME_DREL, SWITCH_DREL, \
@@ -231,6 +232,63 @@ def test_stop_gap_creep_sustained_after_intermittent_noise_still_releases():
   assert out.leadOne.dRel == pytest.approx(6.0)       # sustained motion still releases in bounded time
 
 
+def test_stop_gap_does_not_double_bias_a_jump_guard_held_lead():
+  # route 550a71ee4c7a7fbe/000004bc--d9e0efd5ac, t~1563.4-1563.9: a lead sitting near-stopped (vLead~0,
+  # inside the stop-gap regime) departs fast enough that a single raw dRel jump exceeds jump-guard's
+  # SWITCH_DREL. Jump-guard holds its OLD, stale (near-zero vLead0) reading rather than the new, fast, real
+  # one -- and that held vLead0 STILL satisfies the stop-gap regime check (it looks near-stopped), so without
+  # the skip, stop-gap piles a SECOND closer-bias on top of an already-stale value. On the real route this
+  # compounding dropped the reported gap far enough (raw ~16m -> ~2-5m) to fool the MPC's own forward-solve
+  # into a spurious FCW during a real launch. Fixed: stop-gap must skip a held (stale) lead entirely.
+  v_ego = (LOW_SPEED_PASSTHROUGH_V + STOP_GAP_VEGO) / 2   # in-band for jump-guard hold AND stop-gap regime
+  c = ctrl(v_ego=v_ego)
+  dRel0, vRel0, vLead0 = 7.5, -0.1, 0.2                  # near-stopped baseline, trusted
+  c.smooth_radarstate(rs(lead(dRel=dRel0, vRel=vRel0, vLead=vLead0)))
+  jumped = c.smooth_radarstate(rs(lead(dRel=dRel0 + SWITCH_DREL + 1.0, vRel=6.5, vLead=6.8)))  # real, fast departure
+  expected_held = dRel0 - max(-vRel0, 0.0) * DT_MDL      # jump-guard's own extrapolation -- no further bias
+  assert jumped.leadOne.dRel == pytest.approx(expected_held, abs=1e-6)
+
+
+def test_smoother_does_not_launder_a_jump_guard_hold_during_churn():
+  # A churn episode (real radarTrackId flapping, steady kinematics) actively engaging the smoother right as a
+  # jump-guard hold begins must not let the smoother wrap the held lead into a _SmoothedLead -- that would hide
+  # "this is stale" from stop-gap's held-lead check and let a second closer-bias stack on top.
+  v_ego = (LOW_SPEED_PASSTHROUGH_V + STOP_GAP_VEGO) / 2   # in-band for jump-guard hold AND stop-gap regime
+  c = ctrl(v_ego=v_ego)
+  d = 9.0
+  for i in range(8):
+    tid = 1 if i % 2 == 0 else 2
+    c.smooth_radarstate(rs(lead(dRel=d, vRel=-6.3, vLead=0.2, radarTrackId=tid)))
+    dRel0 = d
+    d -= 0.15
+  assert c.lead_unstable()                               # churn primed the smoother
+  vRel0 = -6.3
+  jumped = c.smooth_radarstate(rs(lead(dRel=dRel0 + SWITCH_DREL + 1.0, vRel=6.5, vLead=6.8, radarTrackId=1)))
+  expected_held = dRel0 - max(-vRel0, 0.0) * DT_MDL
+  assert type(jumped.leadOne).__name__ == '_HeldLead'
+  assert jumped.leadOne.dRel == pytest.approx(expected_held, abs=1e-6)
+
+
+def test_stop_gap_creep_latch_survives_an_unrelated_jump_guard_hold():
+  # A creep-release already earned (sustained real motion) must not be wiped by an unrelated jump-guard hold
+  # that happens to land on the same lead -- the hold is a one-cycle fusion transient, not evidence the lead
+  # stopped moving again.
+  v_ego = (LOW_SPEED_PASSTHROUGH_V + STOP_GAP_VEGO) / 2   # in-band for jump-guard hold AND stop-gap regime
+  c = ctrl(v_ego=v_ego)
+  d = 4.0
+  for _ in range(STOP_GAP_CREEP_HOLD_FRAMES + 2):
+    d += 0.05
+    c.smooth_radarstate(rs(lead(dRel=d, vRel=-6.0, vLead=0.4)))
+  assert c._creep_released
+  dRel0 = d
+  held = c.smooth_radarstate(rs(lead(dRel=dRel0 + SWITCH_DREL + 1.0, vRel=6.5, vLead=6.8)))
+  assert type(held.leadOne).__name__ == '_HeldLead'       # bias correctly skipped on the held cycle
+  assert c._creep_released                                # but the earned latch must survive the glitch
+  d += 0.05
+  out = c.smooth_radarstate(rs(lead(dRel=d, vRel=-0.4, vLead=0.4)))
+  assert out.leadOne.dRel == pytest.approx(d)              # creep resumes unbiased, no re-suppression
+
+
 def test_low_speed_override_lead_passthrough():
   # radard low_speed_override emits a real closest-track lead with modelProb=0.0. It must be honored, not
   # rejected in favor of a stale farther held lead (which would under-brake / stop too close).
@@ -327,6 +385,17 @@ def test_jump_guard_replays_real_route_sub_threshold_bounce():
   assert seen[4] == pytest.approx(12.32)          # the initial closer jump (17.70->12.32) passes immediately
   assert seen[8] < 14.0                            # the 12.24->17.15 farther excursion is held, not passed
   assert out.leadOne.dRel == pytest.approx(11.80)  # recovers exactly once raw resumes reporting close values
+
+
+def test_jump_guard_hold_caps_model_prob_for_fcw():
+  # route 550a71ee4c7a7fbe/000004bc--d9e0efd5ac, t~1563.5: a real, high-confidence (modelProb 0.999) lead
+  # departs and gets held near-stationary by the guard mid-launch. The stock crash_cnt FCW gate fires on
+  # radarState.leadOne.modelProb > 0.9 -- a held (stale, no longer confirmed-fresh) reading must not carry
+  # enough confidence on its own to satisfy that gate, matching _LeadHold's existing flicker-hold cap.
+  c = ctrl()
+  c.smooth_radarstate(rs(lead(dRel=15.72, vRel=1.80, vLead=6.79, modelProb=0.999)))
+  held = c.smooth_radarstate(rs(lead(dRel=15.72 + SWITCH_DREL + 1.0, vRel=6.5, vLead=6.8, modelProb=0.999))).leadOne
+  assert held.modelProb <= FCW_PROB_CAP
 
 
 def test_jump_guard_boundary_not_triggered():
