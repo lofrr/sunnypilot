@@ -181,6 +181,8 @@ class Car:
 
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
+    self.hyundai_radar_mode = int(self.params.get("HyundaiRadar", return_default=True))
+    self._applied_hyundai_radar_mode = getattr(self.RI, "radar_mode", self.hyundai_radar_mode)
 
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
@@ -197,6 +199,8 @@ class Car:
     # Update carState from CAN
     CS, CS_SP = self.CI.update(can_list)
     CS_SP = convert_to_capnp(CS_SP)
+
+    self._update_hyundai_radar_mode()
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -223,6 +227,18 @@ class Car:
     CS.vCruiseCluster = float(self.v_cruise_helper.v_cruise_cluster_kph)
 
     return CS, CS_SP, RD
+
+  def _update_hyundai_radar_mode(self) -> None:
+    if self.CP.brand != "hyundai" or self.hyundai_radar_mode == self._applied_hyundai_radar_mode:
+      return
+
+    if self.RI.set_radar_mode(self.hyundai_radar_mode):
+      self.CP_SP_capnp = convert_to_capnp(self.CP_SP)
+      cp_sp_bytes = self.CP_SP_capnp.to_bytes()
+      self.params.put("CarParamsSP", cp_sp_bytes)
+      self.params.put("CarParamsSPCache", cp_sp_bytes)
+      self.params.put("CarParamsSPPersistent", cp_sp_bytes)
+    self._applied_hyundai_radar_mode = self.hyundai_radar_mode
 
   def state_publish(self, CS: car.CarState, CS_SP: custom.CarStateSP, RD: structs.RadarDataT | None):
     """carState and carParams publish loop"""
@@ -302,6 +318,7 @@ class Car:
     while not evt.is_set():
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      self.hyundai_radar_mode = int(self.params.get("HyundaiRadar", return_default=True))
 
       # sunnypilot
       self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
