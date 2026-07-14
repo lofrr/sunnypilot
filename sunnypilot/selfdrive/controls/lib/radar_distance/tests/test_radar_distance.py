@@ -456,6 +456,44 @@ def test_jump_guard_boundary_not_triggered():
   assert out.leadOne.dRel == pytest.approx(30.0 + SWITCH_DREL - 0.1)   # under threshold -> passes through
 
 
+def test_jump_guard_does_not_hold_a_stale_reference_after_an_extended_low_speed_gap():
+  # Mirrors _LeadHold's identical bug (see test_hold_does_not_resurrect_a_stale_lead_after_an_extended_low_speed_gap):
+  # _jump_guard.step() is also only called above LOW_SPEED_PASSTHROUGH_V, so its _last reference used to
+  # freeze for the entire duration of any low-speed period with no elapsed-time awareness. Route
+  # 550a71ee4c7a7fbe/000004dc--c8c0867520, t~407.1: a lead tracked at dRel=11.72 while decelerating into a
+  # stop froze there through a ~160s standstill. On relaunch the real lead (now dRel=23.16, opening) was
+  # diffed against that 160s-stale reference as if it were a same-cycle transient, held as a fabricated
+  # closing lead, and fed the MPC a phantom near-collision course that produced a real, unwarranted hard
+  # brake on a real drive.
+  c = ctrl(v_ego=LOW_SPEED_PASSTHROUGH_V + 1.0)
+  c.smooth_radarstate(rs(lead(dRel=11.72, vRel=-2.33, vLead=2.72)))    # last reading before decelerating to a stop
+  c._v_ego = CREEP_PASSTHROUGH_V - 0.5                                 # full stop: jump-guard.step() never called
+  for _ in range(HOLD_MAX_FRAMES * 10):                                # far longer than any hold cap -- a real gap
+    c.smooth_radarstate(rs(lead(dRel=3.68, vRel=0.0, vLead=0.0)))     # the lead is stopped just ahead
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 1.0                             # relaunch: real lead now far + opening
+  out = c.smooth_radarstate(rs(lead(dRel=23.16, vRel=4.72, vLead=9.77))).leadOne
+  assert out.dRel == pytest.approx(23.16)             # fresh reading passes through, not held as a phantom jump
+  assert out.vRel == pytest.approx(4.72)
+
+
+def test_jump_guard_survives_a_single_incidental_gap_without_losing_protection():
+  # Regression: a flat ">1 frame gap -> stale" threshold discarded the trusted reference (and so skipped the
+  # SWITCH_DREL check entirely) after ANY single skipped call -- not just a real multi-second stop. That
+  # happens on every cycle of ordinary v_ego dithering right at LOW_SPEED_PASSTHROUGH_V (a car crawling near
+  # 5 m/s in stop-and-go traffic), permanently voiding the same-cycle fusion-transient guard for as long as the
+  # dithering continues and letting a real glitch straight through. A single one-frame dip (a momentary v_ego
+  # dip below the gate, then immediately back above it) must NOT be treated as stale -- the original farther-
+  # jump rejection must still fire right after it, same as it would with no gap at all.
+  c = ctrl(v_ego=LOW_SPEED_PASSTHROUGH_V + 1.0)
+  c.smooth_radarstate(rs(lead(dRel=30.0, vRel=-2.0, vLead=18.0)))
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V - 1.0             # one incidental dip below the gate
+  c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0)))
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 1.0             # immediately back above it
+  glitch = rs(lead(dRel=30.0 + SWITCH_DREL + 1.0, vRel=6.0, vLead=20.0))   # same-cycle fusion transient
+  out = c.smooth_radarstate(glitch).leadOne
+  assert out.dRel < 32.0                               # still held near ~30, glitch did not leak through
+
+
 # --- flicker-hold -----------------------------------------------------------------------------------------
 
 def test_holds_after_sustained_dropout():
@@ -493,7 +531,9 @@ def test_hold_does_not_resurrect_a_stale_lead_after_an_extended_low_speed_gap():
 
 def test_hold_survives_a_brief_low_speed_dip_within_the_cap():
   # A short dip below the gate (well under HOLD_MAX_FRAMES real cycles) is the case flicker-hold exists for --
-  # it must still bridge, same as a same-speed dropout of the same real duration would.
+  # it must still bridge, same as a same-speed dropout of the same real duration would. dRel must stay close
+  # to the real last-known value (a genuine dead-reckoned extrapolation) -- NOT collapse toward MIN_HELD_DREL,
+  # which is what a broken reseed would produce (see test_hold_reseeds_correctly_after_any_low_speed_gap).
   c = ctrl(v_ego=LOW_SPEED_PASSTHROUGH_V + 1.0)
   for _ in range(3):
     c.smooth_radarstate(rs(lead(dRel=30.0, vRel=-3.0, vLead=5.0)))
@@ -504,6 +544,25 @@ def test_hold_survives_a_brief_low_speed_dip_within_the_cap():
   out = c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0)))
   assert out.leadOne.status is True
   assert out.leadOne.dRel < 30.0
+  assert out.leadOne.dRel > 29.0                     # dead-reckoned from 30.0, not collapsed to MIN_HELD_DREL
+
+
+def test_hold_reseeds_correctly_after_any_low_speed_gap():
+  # Regression: _held_dRel used to be reseeded to the real last-known value only when since_real == 1. Once
+  # since_real became elapsed-REAL-frames (not a self-incrementing call counter), any skipped low-speed frame
+  # made since_real > 1 on the very first dropout call actually made, silently skipping the reseed -- leaving
+  # _held_dRel at its stale/init value (0.0), which the very next line's floor clamps to MIN_HELD_DREL: a
+  # fabricated near-bumper phantom lead fed straight to the MPC, not a dead-reckoned extrapolation of the real
+  # one. A single one-frame low-speed dip (the shortest possible gap, ~0.05s) is enough to trigger it.
+  c = ctrl(v_ego=LOW_SPEED_PASSTHROUGH_V + 1.0)
+  for _ in range(3):
+    c.smooth_radarstate(rs(lead(dRel=50.0, vRel=-3.0, vLead=15.0)))
+  c._v_ego = CREEP_PASSTHROUGH_V - 0.5
+  c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0)))   # exactly ONE low-speed frame
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 1.0
+  out = c.smooth_radarstate(rs(lead(status=False, dRel=0.0, modelProb=0.0))).leadOne
+  assert out.status is True
+  assert out.dRel > 45.0                             # must be near the real ~50m, not a fabricated 0.5m
 
 
 def test_releases_after_hold_cap():
@@ -702,3 +761,41 @@ def test_smoother_same_track_noise_ignores_drel_jump():
   for i in range(30):
     out = c.smooth_radarstate(rs(lead(dRel=40.0 if i % 2 == 0 else 55.0, vLead=18.0, vRel=-1.0, radarTrackId=4)))
   assert out.leadOne.dRel < 45.0                     # held near the trusted value by the jump-guard, not 55
+
+
+def test_smoother_does_not_lag_a_stale_ema_after_an_extended_low_speed_gap():
+  # Mirrors the identical bug already fixed in _JumpGuard/_LeadHold: _smoother.update() is only called above
+  # CREEP_PASSTHROUGH_V (see smooth_radarstate), so its EMA state (_d/_vl/_vr) and _hold freeze for the entire
+  # duration of any full standstill. Resuming and EMA-ing a real, opening lead against that frozen state as if
+  # no time had passed lags dRel toward the stale, closer pre-stop value -- confirmed on the same real route as
+  # the _JumpGuard bug (550a71ee4c7a7fbe/000004dc--c8c0867520): pre-fix this reported 12.86m instead of the
+  # real 23.16m on relaunch.
+  c = ctrl(v_ego=LOW_SPEED_PASSTHROUGH_V + 1.0)
+  for i in range(12):
+    c.smooth_radarstate(rs(lead(dRel=11.72, vLead=2.72, vRel=-2.33, radarTrackId=1 if i % 2 else 2)))  # arms churn
+  c._v_ego = CREEP_PASSTHROUGH_V - 0.5                   # full stop: smoother.update() never called
+  for _ in range(60):
+    c.smooth_radarstate(rs(lead(dRel=3.68, vRel=0.0, vLead=0.0)))
+  c._v_ego = LOW_SPEED_PASSTHROUGH_V + 1.0               # relaunch: real lead now far + opening
+  out = c.smooth_radarstate(rs(lead(dRel=23.16, vRel=4.72, vLead=9.77, radarTrackId=1))).leadOne
+  assert out.dRel == pytest.approx(23.16)                # fresh reading passes through, not EMA-lagged stale
+
+
+def test_single_incidental_gap_during_churn_does_not_leak_a_glitch_into_the_ema():
+  # Regression, deeper than the single-mechanism cases above: a flat ">1 frame gap -> stale" threshold made
+  # _jump_guard treat ANY single skipped call as fully stale and skip the SWITCH_DREL check -- so a same-cycle
+  # fusion-transient glitch right after one incidental low-speed dip passed straight through _jump_guard
+  # unguarded, then got folded into the churn smoother's EMA (which was still live from before the dip),
+  # lagging vLead/dRel toward the glitch's inflated values for ~1s: a farther-and-faster-than-real lead, i.e.
+  # a real violation of this file's own invariant ("NEVER report a farther-or-faster lead than reality").
+  c = ctrl(v_ego=10.0)
+  for i in range(6):                                     # prime churn (real radar trackId-flip signature)
+    tid = 1 if i % 2 == 0 else 2
+    c.smooth_radarstate(rs(lead(dRel=30.0, vRel=-1.0, vLead=15.0, radarTrackId=tid)))
+  c._v_ego = 3.0                                         # one incidental dip into the creep band
+  c.smooth_radarstate(rs(lead(dRel=30.0, vRel=-1.0, vLead=15.0, radarTrackId=1)))
+  c._v_ego = 10.0                                        # immediately back above the full-pipeline gate
+  glitch = lead(dRel=30.0 + SWITCH_DREL + 1.0, vRel=6.0, vLead=20.0, radarTrackId=1)
+  out = c.smooth_radarstate(rs(glitch)).leadOne
+  assert out.dRel < 31.0                                 # held near real ~30, not the glitch's 35.0
+  assert out.vLead < 16.0                                # held near real ~15, not the glitch's 20.0

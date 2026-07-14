@@ -51,6 +51,14 @@ SWITCH_DREL = 4.0               # m, dRel jump = a track switch (used by the ins
 # frames. Self-heals fast so a genuinely-departing lead is never held stale for long.
 JUMP_GUARD_MAX_HOLD = 10       # frames (~0.5s)
 
+# How many frames a _JumpGuard/_LeadSmoother reference can go without a step()/update() call (below the speed
+# gate that call is skipped entirely) before it's discarded as stale rather than diffed/EMA'd against. Must be
+# small next to a real stop (the bug this guards against ran 3200+ frames/160s) but comfortably bigger than an
+# incidental single skipped cycle from v_ego dithering right at LOW_SPEED_PASSTHROUGH_V/CREEP_PASSTHROUGH_V --
+# a flat ">1" here defeated the same-cycle farther-jump guard on every dithered cycle and let a real jitter
+# glitch leak into the smoother's EMA for up to ~1s.
+REFERENCE_STALE_FRAMES = 20    # ~1.0s
+
 # Lead-instability detector (telemetry only): flags a bimodal/bouncing radar lead.
 STABILITY_WINDOW = 5           # frames (~0.25s @ 20Hz)
 VLEAD_SPREAD = 4.0            # m/s, vLead range over the window above which the lead is "unstable"
@@ -149,19 +157,31 @@ class _LeadSmoother:
     self._vl = None
     self._vr = None
     self._hold = 0
+    self._last_frame = 0
 
   def reset(self):
     self._d = None
     self._vl = None
     self._vr = None
     self._hold = 0
+    self._last_frame = 0
 
-  def update(self, lead, noisy: bool):
+  def update(self, lead, noisy: bool, frame: int):
     # A held lead's dRel/vLead is a stale extrapolation -- feeding it into the EMA would both hide that from
     # downstream (wraps it into a _SmoothedLead) and pollute _d/_vl/_vr, lagging the real value's recovery.
     if isinstance(lead, _HeldLead):
       self.reset()
       return lead
+    # update() is only called above CREEP_PASSTHROUGH_V (see smooth_radarstate), so _hold and the EMA state
+    # (_d/_vl/_vr) freeze for the entire duration of any full standstill. Resuming and EMA-ing a real, opening
+    # lead against that frozen _d as if no time had passed lags dRel toward the stale, closer pre-stop value
+    # for up to LEAD_SMOOTH_TAU-ish seconds -- same bug class as _JumpGuard/_LeadHold's frame-based staleness
+    # fixes. Treat a gap since the last call larger than REFERENCE_STALE_FRAMES (not a flat 1) as no state at
+    # all, so an incidental single skipped cycle from v_ego dithering right at the gate doesn't itself wipe the
+    # EMA's short-term jitter-suppression memory.
+    if self._last_frame and frame - self._last_frame > REFERENCE_STALE_FRAMES:
+      self.reset()
+    self._last_frame = frame
     self._hold = LEAD_SMOOTH_HOLD if noisy else self._hold - 1
     if self._hold <= 0 or not lead.status:
       self.reset()
@@ -186,39 +206,54 @@ class _JumpGuard:
   # reading is no longer confirmed fresh, so it must not carry enough confidence to trip the stock FCW gate.
   def __init__(self):
     self._last = None
+    self._last_frame = 0
     self._hold = 0
     self._grace_used = False
 
   def reset(self):
     self._last = None
+    self._last_frame = 0
     self._hold = 0
     self._grace_used = False
 
-  def step(self, raw):
+  def step(self, raw, frame):
     if not raw.status:
       self.reset()
       return raw
 
-    if self._last is not None and (raw.dRel - self._last[0]) > SWITCH_DREL and self._hold < JUMP_GUARD_MAX_HOLD:
+    # _last is only a valid reference to diff against if it's recent. smooth_radarstate() stops calling step()
+    # below LOW_SPEED_PASSTHROUGH_V (see _LeadHold), so after any low-speed gap (a full stop, a slow zone)
+    # _last can be arbitrarily many real seconds old. Diffing a fresh reading against a stale one as if it were
+    # a same-cycle transient rejects a real, large, entirely legitimate change (e.g. a lead that pulled away
+    # during the gap) as a fusion glitch and holds a phantom lead -- measured causing a hard, unwarranted brake
+    # on a real route (launch from a stop after the lead had long since moved on). Treat a stale _last as no
+    # reference at all: pass raw through and re-baseline. REFERENCE_STALE_FRAMES (not a flat 1) so an
+    # incidental single skipped cycle from v_ego dithering right at the gate doesn't itself defeat the guard.
+    stale = self._last is not None and (frame - self._last_frame) > REFERENCE_STALE_FRAMES
+
+    if not stale and self._last is not None and (raw.dRel - self._last[0]) > SWITCH_DREL and self._hold < JUMP_GUARD_MAX_HOLD:
       dRel0, vRel0, vLead0, aLeadK0, aLeadTau0, prob0 = self._last
       self._hold += 1
       held_dRel = max(MIN_HELD_DREL, dRel0 - max(-vRel0, 0.0) * DT_MDL)
       self._last = (held_dRel, vRel0, vLead0, aLeadK0, aLeadTau0, prob0)
+      self._last_frame = frame
       return _HeldLead(held_dRel, vRel0, vLead0, aLeadK0, aLeadTau0, min(prob0, FCW_PROB_CAP))
 
     # Hold cap reached on a lead that was closing: self-healing straight onto raw here would adopt a farther
     # reading than the trajectory already tracked, i.e. report a farther lead than reality for at least one
     # more cycle. Take exactly one bounded extra cycle at the last-held value first -- never a second, so this
     # can't turn into an indefinite hold on a lead that genuinely departed.
-    if (self._hold >= JUMP_GUARD_MAX_HOLD and not self._grace_used and self._last is not None and
+    if (not stale and self._hold >= JUMP_GUARD_MAX_HOLD and not self._grace_used and self._last is not None and
         self._last[1] < 0.0 and (raw.dRel - self._last[0]) > SWITCH_DREL):
       dRel0, vRel0, vLead0, aLeadK0, aLeadTau0, prob0 = self._last
       self._grace_used = True
+      self._last_frame = frame
       return _HeldLead(dRel0, vRel0, vLead0, aLeadK0, aLeadTau0, min(prob0, FCW_PROB_CAP))
 
     self._hold = 0
     self._grace_used = False
     self._last = (raw.dRel, raw.vRel, raw.vLead, raw.aLeadK, raw.aLeadTau, raw.modelProb)
+    self._last_frame = frame
     return raw
 
 
@@ -236,6 +271,7 @@ class _LeadHold:
     self._real_frame = 0
     self._armed = False
     self._held_dRel = 0.0
+    self._holding = False   # true once this hold episode has been reseeded from a real reading
 
   def reset(self):
     self.__init__()
@@ -247,18 +283,27 @@ class _LeadHold:
       if self._sustained >= SUSTAIN_FRAMES:
         self._real_frame = frame
         self._armed = True
+      self._holding = False   # back on a real sighting -- the next dropout starts a fresh hold episode
       return raw
 
     self._sustained = 0
     since_real = frame - self._real_frame
     if self._armed and self._last is not None and since_real <= HOLD_MAX_FRAMES:
       dRel0, vRel0, vLead0, aLeadK0, aLeadTau0, prob0 = self._last
-      if since_real == 1:
+      # Reseed _held_dRel from the real last-known value exactly once per hold episode, on whichever call
+      # first starts holding -- NOT on since_real==1: since_real is elapsed REAL frames (see class docstring),
+      # so any low-speed gap in between (step() skipped) makes since_real > 1 on the very first dropout call
+      # actually made, and comparing it to 1 would silently skip the reseed -- leaving _held_dRel at its
+      # stale/init value (0.0), which the next line's floor then clamps to MIN_HELD_DREL: a fabricated
+      # near-bumper phantom lead, not a dead-reckoned extrapolation of the real one.
+      if not self._holding:
         self._held_dRel = dRel0
+        self._holding = True
       self._held_dRel = max(MIN_HELD_DREL, self._held_dRel - max(-vRel0, 0.0) * DT_MDL)
       return _HeldLead(self._held_dRel, vRel0, vLead0, min(aLeadK0, 0.0), aLeadTau0, min(prob0, FCW_PROB_CAP))
 
     self._armed = False
+    self._holding = False
     return raw
 
 
@@ -389,13 +434,13 @@ class RadarDistanceController:
     two = radarstate.leadTwo
     noisy = self._stability.churn or self._stability.same_track_noise
     if self._v_ego >= LOW_SPEED_PASSTHROUGH_V:
-      one = self._jump_guard.step(radarstate.leadOne)         # reject a same-cycle farther-jump transient ...
+      one = self._jump_guard.step(radarstate.leadOne, self._frame)  # reject a same-cycle farther-jump transient ...
       one = self._one.step(one, self._frame)                  # ... + flicker-hold ...
       two = self._two.step(radarstate.leadTwo, self._frame)
-      one = self._smoother.update(one, noisy)                 # ... + same-object de-jitter (anti follow-hunt)
+      one = self._smoother.update(one, noisy, self._frame)     # ... + same-object de-jitter (anti follow-hunt)
     elif self._v_ego >= CREEP_PASSTHROUGH_V:
       # creep band: de-jitter ONLY (symmetric EMA), no flicker-hold (a stale held lead would delay launch)
-      one = self._smoother.update(radarstate.leadOne, noisy)
+      one = self._smoother.update(radarstate.leadOne, noisy, self._frame)
     else:
       one = radarstate.leadOne                                # full standstill: no hold/smoothing
     one = self._stop_gap_bias(one)                            # low-speed near-stopped: settle farther back
