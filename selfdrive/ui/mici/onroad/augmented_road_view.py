@@ -10,6 +10,7 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
+from openpilot.selfdrive.ui.sunnypilot.onroad.radar_tracks import format_radar_tracks_status
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
@@ -159,6 +160,11 @@ class AugmentedRoadView(CameraView):
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER,
                                        alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_MIDDLE)
+    self._radar_tracks_label = UnifiedLabel("radar: none", 18, FontWeight.SEMI_BOLD,
+                                            text_color=rl.Color(0, 255, 64, 255),
+                                            alignment=rl.GuiTextAlignment.TEXT_ALIGN_RIGHT,
+                                            alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_MIDDLE,
+                                            wrap_text=False)
 
     self._fade_texture = gui_app.texture("icons_mici/onroad/onroad_fade.png")
 
@@ -168,6 +174,12 @@ class AugmentedRoadView(CameraView):
 
   def _update_state(self):
     super()._update_state()
+
+    if ui_state.sm.updated["liveTracks"]:
+      status = format_radar_tracks_status(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else "none"
+      self._radar_tracks_label.set_text(f"radar: {status}")
+    elif not ui_state.sm.alive["liveTracks"]:
+      self._radar_tracks_label.set_text("radar: none")
 
     # update offroad label
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
@@ -219,6 +231,21 @@ class AugmentedRoadView(CameraView):
 
     # Fade out bottom of overlays for looks
     rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
+
+    if ui_state.radar_tracks:
+      radar_status_rect = rl.Rectangle(
+        self._content_rect.x + 78,
+        self._content_rect.y + 8,
+        self._content_rect.width - 90,
+        34,
+      )
+      rl.draw_rectangle_rounded(radar_status_rect, 0.5, 8, rl.Color(0, 0, 0, 170))
+      self._radar_tracks_label.render(rl.Rectangle(
+        radar_status_rect.x + 8,
+        radar_status_rect.y,
+        radar_status_rect.width - 16,
+        radar_status_rect.height,
+      ))
 
     alert_to_render, not_animating_out = self._alert_renderer.will_render()
 
