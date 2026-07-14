@@ -4,7 +4,6 @@ from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl, BigMultiParamToggle
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
-from openpilot.selfdrive.ui.sunnypilot.onroad.radar_tracks import format_radar_tracks_status
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
@@ -23,13 +22,9 @@ class TogglesLayoutMici(NavScroller):
     record_mic = BigParamControl("record & upload mic audio", "RecordAudio", toggle_callback=restart_needed_callback)
     enable_openpilot = BigParamControl("enable sunnypilot", "OpenpilotEnabledToggle", toggle_callback=restart_needed_callback)
     hyundai_radar = BigMultiParamToggle("hyundai radar", "HyundaiRadar", ["off", "lead only", "full radar"])
-    radar_tracks = BigParamControl("radar tracks", "RadarTracks")
-    radar_tracks.set_value("none")
-    self._radar_tracks_toggle = radar_tracks
 
     self._scroller.add_widgets([
       hyundai_radar,
-      radar_tracks,
       self._personality_toggle,
       self._experimental_btn,
       is_metric_toggle,
@@ -43,7 +38,6 @@ class TogglesLayoutMici(NavScroller):
     # Toggle lists
     self._refresh_toggles = (
       ("HyundaiRadar", hyundai_radar),
-      ("RadarTracks", radar_tracks),
       ("ExperimentalMode", self._experimental_btn),
       ("IsMetric", is_metric_toggle),
       ("IsLdwEnabled", ldw_toggle),
@@ -65,12 +59,6 @@ class TogglesLayoutMici(NavScroller):
 
   def _update_state(self):
     super()._update_state()
-
-    if ui_state.sm.updated["liveTracks"]:
-      status = format_radar_tracks_status(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else "none"
-      self._radar_tracks_toggle.set_value(status)
-    elif not ui_state.sm.alive["liveTracks"]:
-      self._radar_tracks_toggle.set_value("none")
 
     if ui_state.sm.updated["selfdriveState"]:
       personality = PERSONALITY_TO_INT[ui_state.sm["selfdriveState"].personality]

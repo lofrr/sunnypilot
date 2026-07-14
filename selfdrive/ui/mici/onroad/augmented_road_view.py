@@ -239,41 +239,40 @@ class AugmentedRoadView(CameraView):
     # Fade out bottom of overlays for looks
     rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
 
-    if ui_state.radar_tracks:
-      radar_horizontal_padding = 8
-      radar_column_gap = 8
-      radar_max_inner_width = int(self._content_rect.width - 40)
-      radar_range_max_width = radar_max_inner_width - 36 - radar_column_gap
-      self._radar_ranges_label.get_content_height(radar_range_max_width)
-      self._radar_counts_label.get_content_height(radar_max_inner_width)
-      radar_range_width = int(np.ceil(self._radar_ranges_label.text_width))
-      radar_count_width = max(36, int(np.ceil(self._radar_counts_label.text_width)))
-      radar_status_inner_width = radar_range_width + radar_count_width + (radar_column_gap if radar_range_width else 0)
-      radar_status_width = radar_status_inner_width + radar_horizontal_padding * 2
-      radar_status_height = max(
-        42,
-        self._radar_ranges_label.get_content_height(max(radar_range_width, 1)) + 10,
-        self._radar_counts_label.get_content_height(radar_count_width) + 10,
-      )
-      radar_status_rect = rl.Rectangle(
-        self._content_rect.x + self._content_rect.width - radar_status_width - 12,
-        self._content_rect.y + 8,
-        radar_status_width,
-        radar_status_height,
-      )
-      rl.draw_rectangle_rounded(radar_status_rect, 0.5, 8, rl.Color(0, 0, 0, 170))
-      self._radar_ranges_label.render(rl.Rectangle(
-        radar_status_rect.x + radar_horizontal_padding,
-        radar_status_rect.y + 5,
-        radar_range_width,
-        radar_status_rect.height - 10,
-      ))
-      self._radar_counts_label.render(rl.Rectangle(
-        radar_status_rect.x + radar_horizontal_padding + radar_range_width + (radar_column_gap if radar_range_width else 0),
-        radar_status_rect.y + 5,
-        radar_count_width,
-        radar_status_rect.height - 10,
-      ))
+    radar_horizontal_padding = 8
+    radar_column_gap = 8
+    radar_max_inner_width = int(self._content_rect.width - 40)
+    radar_range_max_width = radar_max_inner_width - 36 - radar_column_gap
+    self._radar_ranges_label.get_content_height(radar_range_max_width)
+    self._radar_counts_label.get_content_height(radar_max_inner_width)
+    radar_range_width = int(np.ceil(self._radar_ranges_label.text_width))
+    radar_count_width = max(36, int(np.ceil(self._radar_counts_label.text_width)))
+    radar_status_inner_width = radar_range_width + radar_count_width + (radar_column_gap if radar_range_width else 0)
+    radar_status_width = radar_status_inner_width + radar_horizontal_padding * 2
+    radar_status_height = max(
+      42,
+      self._radar_ranges_label.get_content_height(max(radar_range_width, 1)) + 10,
+      self._radar_counts_label.get_content_height(radar_count_width) + 10,
+    )
+    radar_status_rect = rl.Rectangle(
+      self._content_rect.x + self._content_rect.width - radar_status_width - 12,
+      self._content_rect.y + 8,
+      radar_status_width,
+      radar_status_height,
+    )
+    rl.draw_rectangle_rounded(radar_status_rect, 0.5, 8, rl.Color(0, 0, 0, 170))
+    self._radar_ranges_label.render(rl.Rectangle(
+      radar_status_rect.x + radar_horizontal_padding,
+      radar_status_rect.y + 5,
+      radar_range_width,
+      radar_status_rect.height - 10,
+    ))
+    self._radar_counts_label.render(rl.Rectangle(
+      radar_status_rect.x + radar_horizontal_padding + radar_range_width + (radar_column_gap if radar_range_width else 0),
+      radar_status_rect.y + 5,
+      radar_count_width,
+      radar_status_rect.height - 10,
+    ))
 
     alert_to_render, not_animating_out = self._alert_renderer.will_render()
 
