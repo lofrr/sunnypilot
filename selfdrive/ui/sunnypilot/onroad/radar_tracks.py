@@ -36,7 +36,7 @@ def format_radar_tracks_onroad_columns(live_tracks) -> tuple[str, str]:
   if not sources:
     return "", "none"
 
-  range_text = "\n".join(f"0x{source.startAddress:X}-0x{source.endAddress:X} -" for source in sources)
+  range_text = "\n".join(f"0x{source.startAddress:X}-0x{source.endAddress:X}" for source in sources)
   count_text = "\n".join(str(source.trackCount) for source in sources)
   return range_text, count_text
 
