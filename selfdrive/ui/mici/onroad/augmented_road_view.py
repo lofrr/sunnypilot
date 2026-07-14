@@ -10,7 +10,7 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
-from openpilot.selfdrive.ui.sunnypilot.onroad.radar_tracks import format_radar_tracks_onroad_status
+from openpilot.selfdrive.ui.sunnypilot.onroad.radar_tracks import format_radar_tracks_onroad_columns
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
@@ -160,11 +160,16 @@ class AugmentedRoadView(CameraView):
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER,
                                        alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_MIDDLE)
-    self._radar_tracks_label = UnifiedLabel("none", 26, FontWeight.SEMI_BOLD,
-                                            text_color=rl.Color(0, 255, 64, 255),
-                                            alignment=rl.GuiTextAlignment.TEXT_ALIGN_RIGHT,
-                                            alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_TOP,
-                                            wrap_text=False)
+    radar_text_args = {
+      "font_size": 26,
+      "font_weight": FontWeight.SEMI_BOLD,
+      "text_color": rl.Color(0, 255, 64, 255),
+      "alignment": rl.GuiTextAlignment.TEXT_ALIGN_RIGHT,
+      "alignment_vertical": rl.GuiTextAlignmentVertical.TEXT_ALIGN_TOP,
+      "wrap_text": False,
+    }
+    self._radar_ranges_label = UnifiedLabel("", **radar_text_args)
+    self._radar_counts_label = UnifiedLabel("none", **radar_text_args)
 
     self._fade_texture = gui_app.texture("icons_mici/onroad/onroad_fade.png")
 
@@ -176,10 +181,12 @@ class AugmentedRoadView(CameraView):
     super()._update_state()
 
     if ui_state.sm.updated["liveTracks"]:
-      status = format_radar_tracks_onroad_status(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else "none"
-      self._radar_tracks_label.set_text(status)
+      status = format_radar_tracks_onroad_columns(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else ("", "none")
+      self._radar_ranges_label.set_text(status[0])
+      self._radar_counts_label.set_text(status[1])
     elif not ui_state.sm.alive["liveTracks"]:
-      self._radar_tracks_label.set_text("none")
+      self._radar_ranges_label.set_text("")
+      self._radar_counts_label.set_text("none")
 
     # update offroad label
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
@@ -234,7 +241,15 @@ class AugmentedRoadView(CameraView):
 
     if ui_state.radar_tracks:
       radar_status_width = self._content_rect.width - 90
-      radar_status_height = max(42, self._radar_tracks_label.get_content_height(int(radar_status_width - 16)) + 10)
+      radar_status_inner_width = int(radar_status_width - 16)
+      radar_count_width = 64
+      radar_column_gap = 6
+      radar_range_width = radar_status_inner_width - radar_count_width - radar_column_gap
+      radar_status_height = max(
+        42,
+        self._radar_ranges_label.get_content_height(radar_range_width) + 10,
+        self._radar_counts_label.get_content_height(radar_count_width) + 10,
+      )
       radar_status_rect = rl.Rectangle(
         self._content_rect.x + 78,
         self._content_rect.y + 8,
@@ -242,10 +257,16 @@ class AugmentedRoadView(CameraView):
         radar_status_height,
       )
       rl.draw_rectangle_rounded(radar_status_rect, 0.5, 8, rl.Color(0, 0, 0, 170))
-      self._radar_tracks_label.render(rl.Rectangle(
+      self._radar_ranges_label.render(rl.Rectangle(
         radar_status_rect.x + 8,
         radar_status_rect.y + 5,
-        radar_status_rect.width - 16,
+        radar_range_width,
+        radar_status_rect.height - 10,
+      ))
+      self._radar_counts_label.render(rl.Rectangle(
+        radar_status_rect.x + 8 + radar_range_width + radar_column_gap,
+        radar_status_rect.y + 5,
+        radar_count_width,
         radar_status_rect.height - 10,
       ))
 
