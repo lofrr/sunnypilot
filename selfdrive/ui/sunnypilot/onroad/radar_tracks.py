@@ -42,7 +42,7 @@ def format_radar_tracks_onroad_columns(live_tracks) -> tuple[str, str]:
 
 
 class RadarTracks:
-  def draw_radar_tracks(self, live_tracks, map_to_screen, path_offset_z, track_size=6):
+  def draw_radar_tracks(self, live_tracks, map_to_screen, path_offset_z, track_size=6, screen_offset=(0, 0)):
     for track in live_tracks.points:
       d_rel, y_rel, v_rel, a_rel = track.dRel, track.yRel, track.vRel, track.aRel
       if not (math.isfinite(d_rel) and math.isfinite(y_rel) and math.isfinite(v_rel) and math.isfinite(a_rel)):
@@ -52,5 +52,5 @@ class RadarTracks:
       if pt is None:
         continue
 
-      x, y = pt
+      x, y = pt[0] + screen_offset[0], pt[1] + screen_offset[1]
       rl.draw_circle(int(x), int(y), track_size, rl.Color(0, 255, 64, 255))
