@@ -188,7 +188,7 @@ class AugmentedRoadView(CameraView):
       live_tracks = ui_state.sm["liveTracks"]
       self._radar_tracks_settings_prompt = bool(live_tracks.radarTracksAvailable and ui_state.hyundai_radar_mode != 2)
       if self._radar_tracks_settings_prompt:
-        status = ("", "radar tracks detected")
+        status = ("", "radar detected\ntap to enable")
       else:
         status = format_radar_tracks_onroad_columns(live_tracks) if ui_state.sm.valid["liveTracks"] else ("", "none")
       self._radar_ranges_label.set_text(status[0])
@@ -207,7 +207,7 @@ class AugmentedRoadView(CameraView):
       self._offroad_label.set_text("start the car to\nuse sunnypilot")
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
-    if (self._radar_tracks_settings_prompt and self._radar_tracks_settings_callback is not None and
+    if (self._radar_tracks_settings_callback is not None and
         rl.check_collision_point_rec(mouse_pos, self._radar_status_rect)):
       self._radar_tracks_settings_callback()
       return
