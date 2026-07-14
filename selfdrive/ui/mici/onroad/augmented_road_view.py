@@ -241,7 +241,7 @@ class AugmentedRoadView(CameraView):
 
     if ui_state.radar_tracks:
       radar_horizontal_padding = 8
-      radar_column_gap = 2
+      radar_column_gap = 8
       radar_max_inner_width = int(self._content_rect.width - 40)
       radar_range_max_width = radar_max_inner_width - 36 - radar_column_gap
       self._radar_ranges_label.get_content_height(radar_range_max_width)
