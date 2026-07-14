@@ -24,11 +24,21 @@ def format_radar_tracks_status(live_tracks) -> str:
 
 
 def format_radar_tracks_onroad_status(live_tracks) -> str:
+  range_text, count_text = format_radar_tracks_onroad_columns(live_tracks)
+  if not range_text:
+    return count_text
+
+  return "\n".join(f"{radar_range} {track_count}" for radar_range, track_count in zip(range_text.splitlines(), count_text.splitlines(), strict=True))
+
+
+def format_radar_tracks_onroad_columns(live_tracks) -> tuple[str, str]:
   sources = sorted(live_tracks.trackSources, key=lambda source: (source.startAddress, source.endAddress, source.bus))
   if not sources:
-    return "none"
+    return "", "none"
 
-  return "\n".join(f"0x{source.startAddress:X}-0x{source.endAddress:X} - {source.trackCount}" for source in sources)
+  range_text = "\n".join(f"0x{source.startAddress:X}-0x{source.endAddress:X} -" for source in sources)
+  count_text = "\n".join(str(source.trackCount) for source in sources)
+  return range_text, count_text
 
 
 class RadarTracks:
