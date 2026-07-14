@@ -24,12 +24,11 @@ def format_radar_tracks_status(live_tracks) -> str:
 
 
 def format_radar_tracks_onroad_status(live_tracks) -> str:
-  ranges = _radar_track_ranges(live_tracks)
-  if not ranges:
-    return "range: none\ntracks: none"
+  sources = sorted(live_tracks.trackSources, key=lambda source: (source.startAddress, source.endAddress, source.bus))
+  if not sources:
+    return "none"
 
-  range_text = ", ".join(f"0x{start:X}-0x{end:X}" for start, end in ranges)
-  return f"range: {range_text}\ntracks: {len(live_tracks.points)}"
+  return "\n".join(f"0x{source.startAddress:X}-0x{source.endAddress:X} - {source.trackCount}" for source in sources)
 
 
 class RadarTracks:

@@ -160,9 +160,9 @@ class AugmentedRoadView(CameraView):
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER,
                                        alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_MIDDLE)
-    self._radar_tracks_label = UnifiedLabel("range: none\ntracks: none", 26, FontWeight.SEMI_BOLD,
+    self._radar_tracks_label = UnifiedLabel("none", 26, FontWeight.SEMI_BOLD,
                                             text_color=rl.Color(0, 255, 64, 255),
-                                            alignment=rl.GuiTextAlignment.TEXT_ALIGN_LEFT,
+                                            alignment=rl.GuiTextAlignment.TEXT_ALIGN_RIGHT,
                                             alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_TOP,
                                             wrap_text=False)
 
@@ -176,10 +176,10 @@ class AugmentedRoadView(CameraView):
     super()._update_state()
 
     if ui_state.sm.updated["liveTracks"]:
-      status = format_radar_tracks_onroad_status(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else "range: none\ntracks: none"
+      status = format_radar_tracks_onroad_status(ui_state.sm["liveTracks"]) if ui_state.sm.valid["liveTracks"] else "none"
       self._radar_tracks_label.set_text(status)
     elif not ui_state.sm.alive["liveTracks"]:
-      self._radar_tracks_label.set_text("range: none\ntracks: none")
+      self._radar_tracks_label.set_text("none")
 
     # update offroad label
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
@@ -233,11 +233,13 @@ class AugmentedRoadView(CameraView):
     rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
 
     if ui_state.radar_tracks:
+      radar_status_width = self._content_rect.width - 90
+      radar_status_height = max(42, self._radar_tracks_label.get_content_height(int(radar_status_width - 16)) + 10)
       radar_status_rect = rl.Rectangle(
         self._content_rect.x + 78,
         self._content_rect.y + 8,
-        self._content_rect.width - 90,
-        70,
+        radar_status_width,
+        radar_status_height,
       )
       rl.draw_rectangle_rounded(radar_status_rect, 0.5, 8, rl.Color(0, 0, 0, 170))
       self._radar_tracks_label.render(rl.Rectangle(
